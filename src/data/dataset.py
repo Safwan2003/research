@@ -103,13 +103,67 @@ def load_openi_dataset(reports_dir: str, images_dir: str, limit: Optional[int] =
     return studies
 
 
-def load_chexpert_dataset(csv_path: str, images_root: str, limit: Optional[int] = None) -> list:
+_CHEXPERT_FINDING_COLUMNS = [
+    "Enlarged Cardiomediastinum", "Cardiomegaly", "Lung Opacity", "Lung Lesion",
+    "Edema", "Consolidation", "Pneumonia", "Atelectasis", "Pneumothorax",
+    "Pleural Effusion", "Pleural Other", "Fracture", "Support Devices",
+]
+
+
+def _build_chexpert_pseudo_report(row: dict, uncertain_policy: str = "u_zeros") -> str:
+    """
+    CheXpert ships only structured 0/1/-1/blank finding labels, not free-text
+    reports -- Section 4.1 of the paper describes this as CheXpert's content
+    being "shorter and more label-centric" than OpenI's free-text reports.
+    There is nothing for F_voc / text-embedding extraction to operate on
+    unless we synthesize a short label-derived pseudo-report, so that's what
+    this does.
+
+    Args:
+        row: one row of the CheXpert CSV as a dict (column name -> value).
+        uncertain_policy: how to render a -1 ("uncertain") label --
+            "u_zeros" (default) renders it as "<finding> uncertain."; "u_ones"
+            renders it as "<finding> present." (the two standard conventions
+            for handling CheXpert's uncertain label in the literature).
+    """
+    if row.get("No Finding") == 1:
+        return "No Finding. No acute cardiopulmonary abnormality."
+
+    parts = []
+    for col in _CHEXPERT_FINDING_COLUMNS:
+        val = row.get(col)
+        if val == 1.0 or val == 1:
+            parts.append(f"{col} present.")
+        elif val == -1.0 or val == -1:
+            if uncertain_policy == "u_ones":
+                parts.append(f"{col} present.")
+            else:
+                parts.append(f"{col} uncertain.")
+        # blank/NaN/0.0 -> not mentioned in this study, matches CheXpert's own
+        # sparse-label convention (absence of a positive mention, not a
+        # confirmed negative).
+
+    return " ".join(parts) if parts else "No Finding."
+
+
+def load_chexpert_dataset(
+    csv_path: str, images_root: str, limit: Optional[int] = None,
+    uncertain_policy: str = "u_zeros",
+) -> list:
     """
     Load CheXpert studies from the standard train.csv/valid.csv layout.
 
-    CheXpert's CSV has one row per image with columns like "Path" and
-    disease-finding columns (e.g. "Cardiomegaly", "Edema", ...) as 0/1/-1/blank.
-    Adjust `label_column` below to whichever finding you're evaluating against.
+    CheXpert's CSV has one row per image with columns like "Path", "No
+    Finding", and 13 other disease-finding columns as 0/1/-1/blank.
+
+    label: derived as the binary "abnormal" target used elsewhere in this
+    project (0=normal, 1=abnormal), from the "No Finding" column --
+    label = 0 if "No Finding" == 1, else 1. This is what feeds the Table
+    1-style ablation's logistic regression.
+
+    report_text: since CheXpert has no free-text reports, this is a
+    label-derived pseudo-report (see _build_chexpert_pseudo_report) so F_voc
+    and text-embedding extraction have real input instead of an empty string.
     """
     import pandas as pd
 
@@ -119,12 +173,16 @@ def load_chexpert_dataset(csv_path: str, images_root: str, limit: Optional[int] 
 
     studies = []
     for i, row in df.iterrows():
+        row_dict = row.to_dict()
+        no_finding = row_dict.get("No Finding")
+        label = 0 if (no_finding == 1 or no_finding == 1.0) else 1
+
         study = Study(
             study_id=str(i),
             frontal_image_path=str(Path(images_root) / row["Path"]),
-            report_text="",  # CheXpert has no free-text report, only labels
-            label=None,
-            metadata={"raw_row": row.to_dict()},
+            report_text=_build_chexpert_pseudo_report(row_dict, uncertain_policy),
+            label=label,
+            metadata={"raw_row": row_dict, "uncertain_policy": uncertain_policy},
         )
         studies.append(study)
 

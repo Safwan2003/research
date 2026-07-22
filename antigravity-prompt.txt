@@ -4,8 +4,27 @@ first, then follow YOUR OWN model-specific file:
     - Qwen2-VL track  -> safwan-prompt.txt
     - LLaVA-1.5-7B track -> ammar-prompt.txt
 
+## If you're an AI agent with a quota (Antigravity or otherwise) reading this
+
+Everything described below is now automated in `run_master.sh` /
+`run_master.bat` at the repo root, and `run_chexpert_eval.py`. If your quota
+allows it, you can still help debug/extend things, but the base flow no
+longer requires an agent:
+
+    bash run_master.sh                       # from a WSL Ubuntu terminal, or
+    run_master.bat                           # double-click from Windows Explorer
+
+It does GPU check -> Python env + library install -> CheXpert download ->
+interactive model selection (Qwen2-VL / LLaVA-1.5-7B, or set MODEL= to skip
+the prompt) -> runs `run_chexpert_eval.py` -> appends results to
+`results/experiment_log.json`. Every step is skipped if already done
+(markers in `.setup_markers/`), so re-running after an interruption resumes
+instead of starting over. The rest of this file explains what it's doing and
+why, plus the SAS-token security note -- read that part regardless of
+whether you're a human or an agent.
+
 This repo (research: context-aligned medical VLM) already has commits up to
-3f83ee3 on origin/main. Start by running `git pull origin main` to sync — do
+48cdcae on origin/main. Start by running `git pull origin main` to sync — do
 not lose any local work if this clone has uncommitted changes; check
 `git status` first and stash/commit anything you find before pulling.
 
@@ -89,9 +108,11 @@ locally instead:
 that file as ignored, not staged. If it ever shows up in `git status` as a
 tracked/staged change, stop and ask before committing anything.
 
-Then download with azcopy (the standard tool for Azure Blob SAS URLs; install
-via `curl -sL https://aka.ms/downloadazcopy-v10-linux | tar -xz` inside WSL if
-it's not already available):
+`run_master.sh` does this download step automatically (installs azcopy if
+missing, checks free disk space against the ~471GB full-resolution release,
+and skips it entirely if already done) — you only need to create
+`secrets/chexpert_sas_url.txt` yourself, then run the master script. Doing it
+by hand looks like:
 
     SAS_URL=$(cat secrets/chexpert_sas_url.txt)
     mkdir -p data/chexpert
@@ -102,32 +123,18 @@ matching config.py's `CHEXPERT_CSV_PATH` / `CHEXPERT_IMAGES_ROOT`. `data/` is
 also gitignored, so the downloaded dataset itself won't get committed either
 — only code and the results log should go into git from here.
 
-`src/data/dataset.py`'s `load_chexpert_dataset()` is currently a stub in two
-important ways — fix both before running any ablation on CheXpert:
-
-  1. It hardcodes `report_text=""` with a comment "CheXpert has no free-text
-     report, only labels." Check whether your actual CheXpert copy includes
-     raw report text files (some registered-access copies do, since the
-     public labels were originally extracted from real reports via NLP). If
-     you only have the label CSV, you'll need to build a pseudo-report
-     string per study from the finding columns (e.g.
-     `"Cardiomegaly: positive; Edema: negative; ..."`) so there's SOMETHING
-     to feed the "text" modality — this label-derived text is exactly what
-     the paper means by CheXpert being "shorter and more label-centric"
-     (Section 4.1) compared to OpenI's free-text reports.
-  2. It hardcodes `label=None`. Pick one target for the AUC classification
-     task — the natural choice is CheXpert's "No Finding" column inverted
-     (`label = 1 - No_Finding`, i.e. 1 = abnormal) to match the
-     "0=normal/1=abnormal" convention the OpenI loader already uses.
-     Decide how to handle CheXpert's uncertain label value (-1) — the
-     standard approaches are "u-zeros" (treat -1 as 0/negative) or "u-ones"
-     (treat -1 as 1/positive); pick one, and note which one you used in the
-     run's `config_snapshot` so it's reproducible.
-
-Also double-check the `Path` column format in the actual CSV you get lines up
-with how `load_chexpert_dataset()` joins it to `images_root` — CheXpert's
-released CSVs have used a couple of different path-prefix conventions across
-releases.
+**Already fixed:** `src/data/dataset.py`'s `load_chexpert_dataset()` used to
+stub out `report_text=""` and `label=None`. It now builds a label-derived
+pseudo-report per study (`_build_chexpert_pseudo_report`, matching the
+paper's description of CheXpert as "shorter and more label-centric" than
+OpenI, Section 4.1) and derives `label` from the "No Finding" column
+(0=normal, 1=abnormal), with an `--uncertain-policy` choice
+(`u_zeros`/`u_ones`) for how CheXpert's -1 "uncertain" values are handled --
+recorded in every run's `config_snapshot` for reproducibility. You shouldn't
+need to touch this again unless the actual CSV's column names/format differ
+from what's implemented (check the `Path` column's path-prefix convention
+against `_CHEXPERT_FINDING_COLUMNS` in dataset.py if `load_chexpert_dataset`
+errors on your real CSV).
 
 ## Shared results log — both tracks write to the SAME file
 

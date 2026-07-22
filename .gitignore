@@ -10,4 +10,7 @@ __pycache__/
 .env
 *.sas_url
 secrets/
-data/
+
+# Downloaded datasets and run_master.sh's resume markers -- local-only, not code
+/data/
+.setup_markers/

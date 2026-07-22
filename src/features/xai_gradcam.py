@@ -140,6 +140,58 @@ def extract_xai_features(image_tensor, model, target_layer, class_idx: int = Non
     return derive_spatial_statistics(heatmap)
 
 
+def load_torchxrayvision_classifier(weights: str = "densenet121-res224-all"):
+    """
+    Closes Known Gap #1: loads a DenseNet-121 actually pretrained on real
+    chest X-ray datasets (CheXpert/NIH/MIMIC/PadChest/...) via
+    `torchxrayvision`, instead of ImageNet weights (which produce
+    medically meaningless Grad-CAM attention).
+
+    Requires: pip install torchxrayvision (needs internet on first run to
+    download weights).
+
+    NOTE: torchxrayvision's internal module names have changed across
+    versions. This targets `model.features` (the DenseNet growth path,
+    mirroring torchvision's DenseNet121 structure) as the Grad-CAM target
+    layer. If your installed version differs, run `print(model)` once and
+    adjust `target_layer` to whatever the last convolutional block is
+    actually called.
+
+    Returns:
+        (model, target_layer) -- pass directly into GradCAM(model, target_layer).
+    """
+    import torchxrayvision as xrv
+
+    model = xrv.models.DenseNet(weights=weights)
+    model.eval()
+    target_layer = model.features
+    return model, target_layer
+
+
+def preprocess_for_torchxrayvision(image: "np.ndarray") -> "torch.Tensor":
+    """
+    Preprocess a raw grayscale X-ray array into the format
+    torchxrayvision's models expect: normalized to [-1024, 1024], resized to
+    224x224, shape (1, 1, 224, 224).
+
+    Args:
+        image: 2D numpy array (H, W), raw grayscale pixel values.
+
+    Returns:
+        torch.Tensor, shape (1, 1, 224, 224), ready for GradCAM's image_tensor arg.
+    """
+    import torch
+    import torchxrayvision as xrv
+    from skimage.transform import resize
+
+    img = image.astype(np.float64)
+    img = xrv.datasets.normalize(img, maxval=img.max() if img.max() > 0 else 255)
+    img = resize(img, (224, 224), anti_aliasing=True)
+    tensor = torch.from_numpy(img).float().unsqueeze(0).unsqueeze(0)
+    tensor.requires_grad_(True)
+    return tensor
+
+
 if __name__ == "__main__":
     # Self-test for the part that DOESN'T need PyTorch/GPU/pretrained weights:
     # the statistics function. This confirms Eq. (6) is implemented correctly.
