@@ -1,0 +1,100 @@
+This repo (research: context-aligned medical VLM) already has commits up to
+1c6d242 on origin/main. Start by running `git pull origin main` to sync — do
+not lose any local work if this clone has uncommitted changes; check
+`git status` first and stash/commit anything you find before pulling.
+
+Read CLAUDE.md at the repo root first — it defines the project conventions
+(keep torch/transformers imports local to functions, match paper terminology
+like F_rad/F_xai/F_voc/F_tool, structured output schema) and lists "Known
+gaps" #1-6. Also read
+docs/superpowers/specs/2026-07-22-results-persistence-design.md — it
+describes the append-only JSON results log (results/experiment_log.json)
+added via src/evaluation/results_store.py, and the new
+src/evaluation/responsible_ai_metrics.py module for Table 3/4 metrics.
+
+## This machine
+
+Windows host with Ubuntu via WSL2, NVIDIA GeForce RTX 5060 Ti, 16GB VRAM.
+
+Do all the work from the Ubuntu/WSL side, not native Windows — the repo's
+scripts, paths, and conventions all assume a Linux shell. WSL2 uses the
+Windows NVIDIA driver directly; you do NOT need to install a separate Linux
+GPU driver inside WSL. Before installing anything, confirm the GPU is
+actually visible from inside WSL:
+
+    nvidia-smi
+
+If that fails, stop and tell the user — it usually means the Windows-side
+NVIDIA driver needs updating (CUDA-on-WSL support requires a recent driver),
+not something to work around from inside Linux.
+
+16GB VRAM is comfortably enough for Qwen2-VL-2B-Instruct (the paper's default
+backbone, config.py's VLM_MODEL_NAME) in fp16/bf16 with room to spare, and
+should also handle the 7B variants used in Table 4 (Qwen2-VL-7B, LLaVA-1.5-7B)
+in fp16 — watch nvidia-smi for headroom, and fall back to 8-bit
+(bitsandbytes) loading only if you actually hit an OOM.
+
+Set up the environment inside WSL:
+
+    cd <repo>
+    python3 -m venv .venv && source .venv/bin/activate
+    pip install -r requirements.txt   # installs both the lightweight and GPU sections
+    python3 -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+
+That last line must print `True` and the 5060 Ti's name before you proceed —
+if it prints False, the torch build installed is CPU-only; reinstall torch
+with a CUDA wheel matching your driver (see pytorch.org's install selector)
+rather than working around it.
+
+## Your job: close CLAUDE.md's "Known gaps" in order
+
+1. Plug a real pretrained chest X-ray classifier (torchxrayvision, or the
+   lab's fine-tuned DenseNet-121) into the GradCAM usage in
+   src/features/xai_gradcam.py / run_pipeline.py's run_single().
+2. Download real OpenI data (https://openi.nlm.nih.gov/faq) into
+   data/openi/reports and data/openi/images per config.py's paths. Validate
+   _parse_openi_xml() in src/data/dataset.py against a few real XML files —
+   check the AbstractText/parentImage tag names actually match what you have.
+3. Run `python run_pipeline.py single --image <path> --report <path>` to
+   confirm baseline vs context-driven output side by side on real data.
+4. Wire real features into src/ablation/ablation_study.py's run_ablation()
+   using ~1,000 OpenI studies (radiomics + XAI + sentence-transformers text
+   embeddings). Compare against the paper's Table 1 (text-only ~0.92 AUC,
+   radiomics/XAI-only ~0.52-0.56, full combo ~0.925).
+5. Reproduce Table 2 (hallucination rate) and Table 3 (agentic reasoning) on
+   a 50-study subset using QwenVLReasoner.stepwise_agentic_reasoning(),
+   src/evaluation/hallucination.py, and
+   src/evaluation/responsible_ai_metrics.py
+   (compute_agentic_reasoning_stats / compute_responsible_ai_indicators) for
+   the uncertainty/evidence-length/PHI/unsafe/uncertainty-marker numbers.
+6. Cross-dataset check on CheXpert (Section 5.4) — expect radiomics to beat
+   text there (opposite of OpenI). That's the paper's own finding, not a
+   bug — don't "fix" it.
+
+## Logging results (do this for every real-data run, not synthetic self-tests)
+
+    from src.evaluation.results_store import new_run_record, append_run
+    import config
+
+    run_record = new_run_record(
+        mode="ablation",  # or "hallucination", "agentic_reasoning", "single", etc.
+        config_snapshot={"seed": config.RANDOM_SEED, "n_studies": ..., "dataset": "openi"},
+        results={"ablation": {...}},  # only the keys this run actually produced
+    )
+    append_run(config.RESULTS_LOG_PATH, run_record)
+
+Never write results/experiment_log.json by hand or truncate it — append_run
+already loads-and-appends atomically, so history from both this machine and
+the original dev machine accumulates in one file instead of either side
+erasing the other's runs.
+
+After each meaningful real-data run: `git pull origin main` first (to pick up
+anything logged from the other machine), then commit
+results/experiment_log.json plus any code changes, and `git push origin main`
+so results stay shared between machines.
+
+Sanity-check your numbers against the "Expected results to sanity-check
+against" section at the bottom of CLAUDE.md — same ballpark and direction,
+not exact values, since your dataset subset/seed will differ. If numbers are
+wildly off in shape or direction, treat that as a bug to investigate, not
+something to force-fit.
