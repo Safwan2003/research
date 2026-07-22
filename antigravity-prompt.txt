@@ -70,6 +70,38 @@ first — the lab may already have a copy on a shared drive/server, or you may
 need to register yourselves. The smaller "CheXpert-small" release is fine to
 start with; you don't need the full-resolution ~440GB version.
 
+**Downloading via the AIMI Azure SAS link:** after registering, AIMI's portal
+gives you a signed URL like
+`https://aimistanforddatasets01.blob.core.windows.net/<container>?sv=...&sr=c&sig=...&st=...&se=...&sp=rl`.
+The `sig=`/`st=`/`se=` part is a Shared Access Signature (SAS) token — a
+bearer credential, same category as an API key. It expires (`se=`) and it is
+scoped to whoever registered for it.
+
+**NEVER commit this URL to git or paste it into a shared prompt file.**
+Anyone holding the full URL can download the entire dataset with no login,
+which would let others bypass Stanford's data-use agreement. Store it
+locally instead:
+
+    mkdir -p secrets
+    echo 'PASTE_YOUR_SAS_URL_HERE' > secrets/chexpert_sas_url.txt
+
+`secrets/` and `.env` are already in .gitignore — `git status` should show
+that file as ignored, not staged. If it ever shows up in `git status` as a
+tracked/staged change, stop and ask before committing anything.
+
+Then download with azcopy (the standard tool for Azure Blob SAS URLs; install
+via `curl -sL https://aka.ms/downloadazcopy-v10-linux | tar -xz` inside WSL if
+it's not already available):
+
+    SAS_URL=$(cat secrets/chexpert_sas_url.txt)
+    mkdir -p data/chexpert
+    azcopy copy "$SAS_URL" "data/chexpert" --recursive=true
+
+That mirrors the whole container (images + CSVs) into `data/chexpert`,
+matching config.py's `CHEXPERT_CSV_PATH` / `CHEXPERT_IMAGES_ROOT`. `data/` is
+also gitignored, so the downloaded dataset itself won't get committed either
+— only code and the results log should go into git from here.
+
 `src/data/dataset.py`'s `load_chexpert_dataset()` is currently a stub in two
 important ways — fix both before running any ablation on CheXpert:
 

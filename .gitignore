@@ -5,3 +5,9 @@ __pycache__/
 .ipynb_checkpoints/
 .claude/
 .gemini/
+
+# Local secrets -- never commit SAS tokens / API keys / DUA-gated download URLs
+.env
+*.sas_url
+secrets/
+data/
