@@ -38,39 +38,56 @@ while keeping the public method signatures identical to QwenVLReasoner's.
 Give it the same `if __name__ == "__main__":` self-test-explanation block as
 reasoning.py (it can't run standalone without GPU either).
 
-## Tasks 1-6 (same Known Gaps as Safwan's list, LLaVA side)
+## CURRENT FOCUS: CheXpert (Known Gap #6) — do this first, before anything OpenI-specific
 
-1. GradCAM classifier — this is shared infrastructure (torchxrayvision into
-   src/features/xai_gradcam.py), not model-specific. Coordinate with Safwan
-   so it isn't done twice; whoever gets there first does it, the other pulls
-   the result.
-2. Real OpenI data — also shared; same coordination note as above.
-3. Run your new LlavaVLReasoner the same way Safwan runs QwenVLReasoner:
-   baseline vs context-driven output on one real study, confirm the
-   structured-JSON behavior actually shows up (shorter evidence, calibrated
+Read antigravity-prompt.txt's "CheXpert data + loader gap" section first —
+it covers getting access, and fixing `load_chexpert_dataset()`'s two stubs
+(empty report_text, null label). That part is shared infra; coordinate with
+Safwan so it's not done twice.
+
+Once CheXpert data loads correctly as `Study` objects:
+
+1. **GradCAM classifier** — shared infra with Safwan's track, same
+   coordination note as above (torchxrayvision into
+   src/features/xai_gradcam.py).
+2. Run your new LlavaVLReasoner (Task 0 above) on one real CheXpert
+   image/report pair: baseline vs context-driven output, confirm the
+   structured-JSON behavior shows up (shorter evidence, calibrated
    uncertainty, non-empty limitations/safety_note).
-4. **Ablation study, BLIP text-embedding column (Table 1).** Note: Table 1
+3. **Ablation study, BLIP text-embedding column, on CheXpert.** Note: Table 1
    compares "Qwen" vs "BLIP" text-embedding columns, NOT LLaVA — the paper's
-   Figure 2 caption is explicit about this. Extract radiomics + XAI +
-   BLIP-derived text embeddings (e.g. via a BLIP model's text
-   encoder/projection over each report) for the same ~1,000 OpenI studies,
-   then call `run_ablation()` in src/ablation/ablation_study.py. Target
-   shape (paper's "BLIP" column): text-only ~0.925 AUC, radiomics-only
-   ~0.564, XAI-only ~0.514, full combo ~0.930. Log with `mode="ablation"`,
-   `config_snapshot={"model_family": "llava-1.5-7b", "text_embedding_source": "blip", ...}`.
-5. **Hallucination + agentic reasoning (Tables 2-3-4, LLaVA-1.5-7B column of
-   Table 4).** Use your `LlavaVLReasoner.stepwise_agentic_reasoning()` on
-   the 50-study subset. Same evaluation functions Safwan uses:
-   `hallucination.average_hallucination_rate()`,
-   `responsible_ai_metrics.compute_agentic_reasoning_stats()` (once on step0
-   outputs, once on step1, to compare deltas), and
-   `compute_responsible_ai_indicators()` + `text_metrics.evaluate_batch()`
-   for the LLaVA-1.5-7B row across variants A0-A5 (target from Table 4:
-   A4_image_text is the best-performing variant, ROUGE-L ~0.471,
-   BERTScore-F1 ~0.764). Log with the appropriate mode each time.
-6. CheXpert cross-check — repeat your ablation (BLIP text embeddings) on
-   CheXpert. Expect the same reversed pattern the paper reports (radiomics
-   beats text there) — that's Section 5.4's own finding, not a bug.
+   Figure 2 caption is explicit about this; you're contributing the BLIP
+   column regardless of which VLM you use for reasoning. Extract radiomics +
+   XAI + BLIP-derived text embeddings (over whatever report_text Safwan/you
+   built per the loader-gap fix) for your CheXpert subset, then call
+   `run_ablation()` in src/ablation/ablation_study.py. Target shape
+   (Section 5.4): radiomics should beat text here — the reverse of OpenI's
+   pattern (paper's OpenI "BLIP" column: text-only ~0.925, radiomics-only
+   ~0.564 — expect that relationship to flip on CheXpert like it does for
+   Qwen's ~0.71 vs ~0.50). That's the paper's own reported finding, not a
+   bug — don't "fix" it if you see it. Log with `mode="ablation"`,
+   `config_snapshot={"model_family": "llava-1.5-7b", "text_embedding_source": "blip", "dataset": "chexpert", ...}`.
+4. **Hallucination + agentic reasoning on a CheXpert subset.** Use your
+   `LlavaVLReasoner.stepwise_agentic_reasoning()` over a sample of CheXpert
+   studies, then `hallucination.average_hallucination_rate()`,
+   `responsible_ai_metrics.compute_agentic_reasoning_stats()` (step0 vs
+   step1), and `compute_responsible_ai_indicators()` +
+   `text_metrics.evaluate_batch()`. The paper doesn't give exact target
+   numbers for CheXpert here (Tables 2/3/4 are OpenI-only) — the point is to
+   see whether the same qualitative trend holds, not to hit specific values.
+   Log with `config_snapshot={"model_family": "llava-1.5-7b", "dataset": "chexpert", ...}`.
+
+## Deferred until CheXpert is done: OpenI (Known Gaps #1-5)
+
+Don't start these yet.
+
+- Real OpenI data — shared with Safwan's track.
+- **Ablation study, BLIP text-embedding column, on ~1,000 OpenI studies**
+  (target from Table 1's "BLIP" column: text-only ~0.925 AUC, radiomics-only
+  ~0.564, XAI-only ~0.514, full combo ~0.930).
+- **Hallucination + agentic reasoning + LLaVA-1.5-7B row of Table 4** on the
+  50-study OpenI subset (target: A4_image_text is the best-performing
+  variant, ROUGE-L ~0.471, BERTScore-F1 ~0.764).
 
 Coordinate with Safwan (Qwen2-VL track, safwan-prompt.txt) before either of
 you loads a 7B model onto the GPU at the same time — see the VRAM-sharing

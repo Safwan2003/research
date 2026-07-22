@@ -12,60 +12,59 @@ only exercise it against real data and (for the 7B Table 4 run) point it at
 Every result you log via results_store.append_run must set
 `config_snapshot["model_family"] = "qwen2-vl"`.
 
-## Tasks, in order
+## CURRENT FOCUS: CheXpert (Known Gap #6) — do this first, before anything OpenI-specific
 
-1. **GradCAM classifier (Known Gap #1).** Plug a real pretrained chest X-ray
-   classifier into src/features/xai_gradcam.py's GradCAM usage — use
-   `torchxrayvision` (pretrained on CheXpert/NIH/MIMIC) since no lab
-   fine-tuned DenseNet-121 is available yet. Wire it into run_pipeline.py's
-   run_single() so F_xai stops being a placeholder.
+Read antigravity-prompt.txt's "CheXpert data + loader gap" section first —
+it covers getting access, and fixing `load_chexpert_dataset()`'s two stubs
+(empty report_text, null label). That part is shared infra; coordinate with
+Ammar so it's not done twice.
 
-2. **Real OpenI data (Known Gap #2).** Download from
-   https://openi.nlm.nih.gov/faq into data/openi/reports and
-   data/openi/images per config.py's paths. Open a handful of the real XML
-   files and check them against `_parse_openi_xml()` in src/data/dataset.py
-   — the AbstractText/parentImage tag names have version variance in OpenI's
-   schema, so confirm they actually match before trusting the parser on the
-   full set.
+Once CheXpert data loads correctly as `Study` objects:
 
-3. **Stage 3 for real (Known Gap #3).** With the 2B model:
+1. **GradCAM classifier.** Plug a real pretrained chest X-ray classifier into
+   src/features/xai_gradcam.py's GradCAM usage — use `torchxrayvision`
+   (pretrained on CheXpert/NIH/MIMIC) since no lab fine-tuned DenseNet-121 is
+   available yet. Wire it into run_pipeline.py's run_single().
 
-       python run_pipeline.py single --image <path> --report <path>
+2. **Ablation study, Qwen text-embedding column, on CheXpert.** Extract
+   radiomics + XAI + Qwen-derived text embeddings (over whatever
+   report_text you built per the loader-gap fix) for your CheXpert subset,
+   then call `run_ablation()` in src/ablation/ablation_study.py. Target
+   shape (Section 5.4): radiomics ~0.71 AUC BEATS text ~0.50 here — the
+   reverse of OpenI's pattern. That's the paper's own reported finding, not
+   a bug — don't "fix" it if you see it. Log with `mode="ablation"`,
+   `config_snapshot={"model_family": "qwen2-vl", "dataset": "chexpert", ...}`.
 
-   Confirm the baseline vs context-driven outputs actually differ in the
-   expected direction (context-driven = structured JSON, shorter evidence,
-   calibrated uncertainty, non-empty limitations/safety_note).
+3. **Hallucination + agentic reasoning on a CheXpert subset.** Same
+   evaluation functions as OpenI would use: run
+   `QwenVLReasoner.stepwise_agentic_reasoning()` over a sample of CheXpert
+   studies, then `hallucination.average_hallucination_rate()`,
+   `responsible_ai_metrics.compute_agentic_reasoning_stats()` (step0 vs
+   step1), and `compute_responsible_ai_indicators()` +
+   `text_metrics.evaluate_batch()`. The paper doesn't give exact target
+   numbers for CheXpert here (Tables 2/3/4 are OpenI-only) — the point is to
+   see whether the SAME qualitative trend holds (context alignment still
+   reduces hallucination / stays calibrated), not to hit specific values.
+   Log each with `config_snapshot={"model_family": "qwen2-vl", "dataset": "chexpert", ...}`.
 
-4. **Ablation study, Qwen text-embedding column (Known Gap #4 / Table 1).**
-   Extract radiomics + XAI + Qwen-derived text embeddings for ~1,000 OpenI
-   studies, then call `run_ablation()` in src/ablation/ablation_study.py.
-   You're reproducing the "Qwen" column of Table 1: text-only ~0.918 AUC,
-   radiomics-only ~0.555, XAI-only ~0.519, full combo ~0.925. Log this with
-   `mode="ablation"`, `config_snapshot={"model_family": "qwen2-vl", ...}`.
+Stage 3 single-study sanity check (`python run_pipeline.py single --image
+<path> --report <path>`) works the same regardless of dataset — use a
+CheXpert image/report pair for this instead of OpenI's.
 
-5. **Hallucination + agentic reasoning (Known Gap #5 / Tables 2-3-4,
-   Qwen2-VL column).** On the 50-study subset, use
-   `QwenVLReasoner.stepwise_agentic_reasoning()` (2B model for Table 2/3;
-   swap VLM_MODEL_NAME to "Qwen/Qwen2-VL-7B-Instruct" for the Table 4
-   Qwen2-VL-7B row across the six ablation variants A0-A5). Use:
-     - src/evaluation/hallucination.py's average_hallucination_rate() for
-       Table 2's HR numbers (target shape: 1.14 image-only -> 0.25
-       image+text).
-     - src/evaluation/responsible_ai_metrics.py's
-       compute_agentic_reasoning_stats() for Table 3 (call it once on the
-       step0 outputs, once on step1 outputs, to get both columns +
-       compare deltas — target: uncertainty ~0.70 -> ~0.68, evidence length
-       ~19.4 -> ~15.3 words).
-     - compute_responsible_ai_indicators() plus text_metrics.evaluate_batch()
-       for Table 4's per-variant row (N, ROUGE-1/2/L, BERTScore-F1, PHI %,
-       unsafe %, uncertainty-marker rate).
-   Log each of these (mode="hallucination", "agentic_reasoning", or
-   "text_metrics" as appropriate).
+## Deferred until CheXpert is done: OpenI (Known Gaps #1-5)
 
-6. **CheXpert cross-check (Known Gap #6).** Repeat the ablation on CheXpert.
-   Expect radiomics (~0.71 AUC) to beat text (~0.50) here — the opposite of
-   OpenI. That is the paper's own reported finding (Section 5.4), not a bug —
-   do not "fix" it if you see this pattern.
+Don't start these yet.
+
+- Real OpenI data (https://openi.nlm.nih.gov/faq) into data/openi/reports
+  and data/openi/images per config.py's paths; validate `_parse_openi_xml()`
+  in src/data/dataset.py against real XML files (AbstractText/parentImage
+  tag names have version variance).
+- Ablation study, Qwen column, on ~1,000 OpenI studies (target: text-only
+  ~0.918 AUC, radiomics-only ~0.555, XAI-only ~0.519, full combo ~0.925).
+- Hallucination + agentic reasoning on the 50-study OpenI subset, reproducing
+  Tables 2/3/4's actual target numbers (HR 1.14->0.25, uncertainty
+  ~0.70->~0.68, evidence length ~19.4->~15.3 words, plus the Qwen2-VL-7B row
+  of Table 4 using "Qwen/Qwen2-VL-7B-Instruct").
 
 Coordinate with Ammar (LLaVA track, ammar-prompt.txt) before either of you
 loads a 7B model onto the GPU at the same time — see the VRAM-sharing note

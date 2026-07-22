@@ -5,9 +5,16 @@ first, then follow YOUR OWN model-specific file:
     - LLaVA-1.5-7B track -> ammar-prompt.txt
 
 This repo (research: context-aligned medical VLM) already has commits up to
-a832f5e on origin/main. Start by running `git pull origin main` to sync — do
+3f83ee3 on origin/main. Start by running `git pull origin main` to sync — do
 not lose any local work if this clone has uncommitted changes; check
 `git status` first and stash/commit anything you find before pulling.
+
+## CURRENT FOCUS: CheXpert, not OpenI
+
+The priority right now is CheXpert (Section 5.4 of the paper), not the OpenI
+1,000-study reproduction. Both of your per-model files have a "CURRENT FOCUS"
+section at the top — do that first. The OpenI-specific tasks are still in
+your file but marked deferred; don't start them until told otherwise.
 
 Read CLAUDE.md at the repo root first — it defines the project conventions
 (keep torch/transformers imports local to functions, match paper terminology
@@ -53,6 +60,41 @@ That last line must print `True` and the 5060 Ti's name before you proceed —
 if it prints False, the torch build installed is CPU-only; reinstall torch
 with a CUDA wheel matching your driver (see pytorch.org's install selector)
 rather than working around it.
+
+## CheXpert data + loader gap (shared infrastructure — whoever gets there first does it, the other pulls the result)
+
+Get access: https://stanfordmlgroup.github.io/competitions/chexpert/ requires
+a data-use-agreement/registration (unlike OpenI). Check with the professor
+first — the lab may already have a copy on a shared drive/server, or you may
+need to register yourselves. The smaller "CheXpert-small" release is fine to
+start with; you don't need the full-resolution ~440GB version.
+
+`src/data/dataset.py`'s `load_chexpert_dataset()` is currently a stub in two
+important ways — fix both before running any ablation on CheXpert:
+
+  1. It hardcodes `report_text=""` with a comment "CheXpert has no free-text
+     report, only labels." Check whether your actual CheXpert copy includes
+     raw report text files (some registered-access copies do, since the
+     public labels were originally extracted from real reports via NLP). If
+     you only have the label CSV, you'll need to build a pseudo-report
+     string per study from the finding columns (e.g.
+     `"Cardiomegaly: positive; Edema: negative; ..."`) so there's SOMETHING
+     to feed the "text" modality — this label-derived text is exactly what
+     the paper means by CheXpert being "shorter and more label-centric"
+     (Section 4.1) compared to OpenI's free-text reports.
+  2. It hardcodes `label=None`. Pick one target for the AUC classification
+     task — the natural choice is CheXpert's "No Finding" column inverted
+     (`label = 1 - No_Finding`, i.e. 1 = abnormal) to match the
+     "0=normal/1=abnormal" convention the OpenI loader already uses.
+     Decide how to handle CheXpert's uncertain label value (-1) — the
+     standard approaches are "u-zeros" (treat -1 as 0/negative) or "u-ones"
+     (treat -1 as 1/positive); pick one, and note which one you used in the
+     run's `config_snapshot` so it's reproducible.
+
+Also double-check the `Path` column format in the actual CSV you get lines up
+with how `load_chexpert_dataset()` joins it to `images_root` — CheXpert's
+released CSVs have used a couple of different path-prefix conventions across
+releases.
 
 ## Shared results log — both tracks write to the SAME file
 
