@@ -20,7 +20,12 @@ Three modes:
                                                over your loaded dataset. Needs
                                                real feature vectors + labels; edit
                                                the TODO section below once your
-                                               data loading is wired up.
+                                               data loading is wired up. Pass
+                                               --synthetic to instead run it on
+                                               synthetic data end-to-end (no GPU
+                                               or dataset needed) and log the
+                                               result to the append-only
+                                               results/experiment_log.json.
 """
 
 import argparse
@@ -32,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src" / "vlm"))
 sys.path.insert(0, str(Path(__file__).parent / "src" / "ablation"))
 sys.path.insert(0, str(Path(__file__).parent / "src" / "evaluation"))
 
+import config
 from radiomics import extract_radiomics
 from xai_gradcam import derive_spatial_statistics
 from vocabulary import extract_vocabulary_features, load_vocabulary
@@ -118,21 +124,55 @@ def run_single(image_path: str, report_path: str, question: str):
     print(context_output)
 
 
-def run_ablation():
+def run_ablation(synthetic: bool = False):
     """
     Table 1-style AUC ablation. This needs real feature vectors and labels --
     fill in the TODO below once your dataset loading (src/data/dataset.py) and
     text-embedding step are wired up.
+
+    Pass synthetic=True to instead run the same synthetic self-test that
+    lives in src/ablation/ablation_study.py's __main__ block, but end-to-end
+    through this entry point AND logged to the append-only results log --
+    useful for verifying the whole pipeline + persistence layer works before
+    you have a GPU or real dataset.
     """
-    print(
-        "TODO: load your dataset via src/data/dataset.py, extract radiomics + "
-        "XAI + text-embedding feature vectors for every study, then call:\n\n"
-        "    from src.ablation.ablation_study import run_ablation, print_ablation_table\n"
-        "    results = run_ablation(radiomics_features, xai_features, text_embeddings, labels)\n"
-        "    print_ablation_table(results)\n\n"
-        "See src/ablation/ablation_study.py's __main__ block for a working "
-        "synthetic-data example you can adapt."
+    if not synthetic:
+        print(
+            "TODO: load your dataset via src/data/dataset.py, extract radiomics + "
+            "XAI + text-embedding feature vectors for every study, then call:\n\n"
+            "    from src.ablation.ablation_study import run_ablation, print_ablation_table\n"
+            "    results = run_ablation(radiomics_features, xai_features, text_embeddings, labels)\n"
+            "    print_ablation_table(results)\n\n"
+            "See src/ablation/ablation_study.py's __main__ block for a working "
+            "synthetic-data example you can adapt. Or pass --synthetic to run "
+            "that example here and log it to the results database."
+        )
+        return
+
+    import numpy as np
+    from ablation_study import run_ablation as _run_ablation, print_ablation_table
+    from results_store import append_run, new_run_record
+
+    rng = np.random.default_rng(config.RANDOM_SEED)
+    n = 300
+    labels = rng.integers(0, 2, size=n)
+    text_embeddings = rng.normal(0, 1, size=(n, 16)) + labels[:, None] * 2.0
+    radiomics_features = rng.normal(0, 1, size=(n, 8)) + labels[:, None] * 0.3
+    xai_features = rng.normal(0, 1, size=(n, 4)) + labels[:, None] * 0.2
+
+    results = _run_ablation(
+        radiomics_features, xai_features, text_embeddings, labels,
+        random_state=config.RANDOM_SEED,
     )
+    print_ablation_table(results)
+
+    run_record = new_run_record(
+        mode="ablation",
+        config_snapshot={"seed": config.RANDOM_SEED, "n_studies": n, "dataset": "synthetic"},
+        results={"ablation": results},
+    )
+    append_run(config.RESULTS_LOG_PATH, run_record)
+    print(f"\nLogged to {config.RESULTS_LOG_PATH} (run_id={run_record['run_id']})")
 
 
 if __name__ == "__main__":
@@ -148,7 +188,11 @@ if __name__ == "__main__":
         "--question", default="Is there evidence of active cardiopulmonary abnormality?"
     )
 
-    subparsers.add_parser("ablation", help="Run Table 1-style AUC ablation study")
+    ablation_parser = subparsers.add_parser("ablation", help="Run Table 1-style AUC ablation study")
+    ablation_parser.add_argument(
+        "--synthetic", action="store_true",
+        help="Run on synthetic data end-to-end and log the result (no GPU/dataset needed)",
+    )
 
     args = parser.parse_args()
 
@@ -157,4 +201,4 @@ if __name__ == "__main__":
     elif args.mode == "single":
         run_single(args.image, args.report, args.question)
     elif args.mode == "ablation":
-        run_ablation()
+        run_ablation(synthetic=args.synthetic)
