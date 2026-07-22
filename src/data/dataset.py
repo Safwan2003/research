@@ -39,47 +39,55 @@ def _parse_openi_xml(xml_path: Path) -> Study:
     """
     Parse a single OpenI XML report file into a Study object.
 
-    OpenI XML reports typically contain <AbstractText Label="FINDINGS"> and
-    <AbstractText Label="IMPRESSION"> sections, plus <parentImage id="..."/>
-    references to the associated image files. Adjust the tag names below if
-    your copy of OpenI is structured differently (versions vary).
+    OpenI XML reports contain <AbstractText Label="..."> sections (FINDINGS, IMPRESSION)
+    and <parentImage id="..."> elements. Also extracts binary ground-truth label:
+      0 = normal (Normal tag present / no major abnormalities)
+      1 = abnormal (abnormality tags or findings present)
     """
     tree = ET.parse(xml_path)
     root = tree.getroot()
 
     findings, impression = "", ""
     for abstract in root.iter("AbstractText"):
-        label = abstract.get("Label", "").upper()
+        label = (abstract.get("Label") or abstract.get("label") or "").upper()
         text = (abstract.text or "").strip()
-        if label == "FINDINGS":
+        if "FINDING" in label:
             findings = text
-        elif label == "IMPRESSION":
+        elif "IMPRESSION" in label:
             impression = text
 
     report_text = f"{findings} {impression}".strip()
 
-    image_ids = [img.get("id") for img in root.iter("parentImage")]
+    # Image IDs
+    image_ids = []
+    for img in root.iter("parentImage"):
+        img_id = img.get("id")
+        if img_id:
+            image_ids.append(img_id)
+
+    # Determine ground-truth label (0 = Normal, 1 = Abnormal)
+    major_tags = [elem.text.lower() for elem in root.iter() if elem.tag in ("major", "MeSH", "term") and elem.text]
+    all_text = (report_text + " " + " ".join(major_tags)).lower()
+
+    if "normal" in major_tags or "no acute cardiopulmonary process" in all_text or "unremarkable" in all_text:
+        study_label = 0
+    elif any(term in all_text for term in ["cardiomegaly", "effusion", "pneumothorax", "opacity", "consolidation", "atelectasis", "edema", "granuloma", "infiltrate", "calcinosis"]):
+        study_label = 1
+    else:
+        study_label = 0 if "normal" in all_text else 1
 
     return Study(
         study_id=xml_path.stem,
         report_text=report_text,
-        metadata={"image_ids": image_ids},
+        label=study_label,
+        metadata={"image_ids": image_ids, "major_tags": major_tags},
     )
 
 
 def load_openi_dataset(reports_dir: str, images_dir: str, limit: Optional[int] = None) -> list:
     """
     Load OpenI studies from a directory of XML report files + a directory of
-    associated PNG/JPG images.
-
-    Args:
-        reports_dir: path to folder containing per-study .xml report files.
-        images_dir: path to folder containing the corresponding image files.
-        limit: optionally cap the number of studies loaded (useful while
-               developing/debugging, before running on the full 1,000-study set).
-
-    Returns:
-        list of Study objects.
+    associated PNG images.
     """
     reports_dir = Path(reports_dir)
     images_dir = Path(images_dir)
@@ -93,23 +101,39 @@ def load_openi_dataset(reports_dir: str, images_dir: str, limit: Optional[int] =
         study = _parse_openi_xml(xml_path)
 
         image_ids = study.metadata.get("image_ids", [])
-        if len(image_ids) >= 1:
-            study.frontal_image_path = str(images_dir / f"{image_ids[0]}.png")
-        if len(image_ids) >= 2:
-            study.lateral_image_path = str(images_dir / f"{image_ids[1]}.png")
+        # Resolve image paths if files exist
+        valid_img_paths = []
+        for img_id in image_ids:
+            # Check with or without .png extension
+            cand = images_dir / f"{img_id}.png" if not img_id.endswith(".png") else images_dir / img_id
+            if cand.exists():
+                valid_img_paths.append(str(cand))
+
+        if valid_img_paths:
+            study.frontal_image_path = valid_img_paths[0]
+            if len(valid_img_paths) > 1:
+                study.lateral_image_path = valid_img_paths[1]
 
         studies.append(study)
 
     return studies
 
 
-def load_chexpert_dataset(csv_path: str, images_root: str, limit: Optional[int] = None) -> list:
+def load_chexpert_dataset(
+    csv_path: str,
+    images_root: str,
+    limit: Optional[int] = None,
+    uncertain_policy: str = "u-zeros",
+) -> list:
     """
-    Load CheXpert studies from the standard train.csv/valid.csv layout.
+    Load CheXpert studies from a CSV file (e.g., train.csv / valid.csv).
 
-    CheXpert's CSV has one row per image with columns like "Path" and
-    disease-finding columns (e.g. "Cardiomegaly", "Edema", ...) as 0/1/-1/blank.
-    Adjust `label_column` below to whichever finding you're evaluating against.
+    Per Section 4.1 & 5.4 of the paper:
+      1. Generates a pseudo-report string from finding columns if free-text report is missing
+         (e.g., "Cardiomegaly: positive; Edema: negative; ...").
+      2. Assigns binary ground truth label (0 = Normal, 1 = Abnormal) based on 'No Finding'
+         column and pathology columns under the specified uncertain_policy ('u-zeros' or 'u-ones').
+      3. Resolves image file paths dynamically relative to images_root.
     """
     import pandas as pd
 
@@ -117,14 +141,85 @@ def load_chexpert_dataset(csv_path: str, images_root: str, limit: Optional[int] 
     if limit:
         df = df.head(limit)
 
+    finding_cols = [
+        "Enlarged Cardiomediastinum",
+        "Cardiomegaly",
+        "Lung Opacity",
+        "Lung Lesion",
+        "Edema",
+        "Consolidation",
+        "Pneumonia",
+        "Atelectasis",
+        "Pneumothorax",
+        "Pleural Effusion",
+        "Pleural Other",
+        "Fracture",
+        "Support Devices",
+        "No Finding",
+    ]
+
     studies = []
+    images_root_path = Path(images_root)
+
     for i, row in df.iterrows():
+        # 1. Report text resolution
+        if "Report" in row and pd.notna(row["Report"]) and str(row["Report"]).strip():
+            report_text = str(row["Report"]).strip()
+        elif "findings" in row and pd.notna(row["findings"]) and str(row["findings"]).strip():
+            report_text = str(row["findings"]).strip()
+        else:
+            # Generate pseudo-report from finding columns
+            parts = []
+            for col in finding_cols:
+                if col in row and pd.notna(row[col]):
+                    val = float(row[col])
+                    if val == 1.0:
+                        status = "positive"
+                    elif val == 0.0:
+                        status = "negative"
+                    elif val == -1.0:
+                        status = "negative" if uncertain_policy == "u-zeros" else "positive"
+                    else:
+                        continue
+                    parts.append(f"{col}: {status}")
+            report_text = "; ".join(parts) + "." if parts else "No findings documented."
+
+        # 2. Binary Ground Truth Label (0 = Normal, 1 = Abnormal)
+        if "No Finding" in row and pd.notna(row["No Finding"]) and float(row["No Finding"]) == 1.0:
+            label = 0
+        else:
+            # Check if any pathology is positive (or uncertain if u-ones)
+            has_pathology = False
+            for col in finding_cols[:-1]:  # exclude 'No Finding'
+                if col in row and pd.notna(row[col]):
+                    val = float(row[col])
+                    if val == 1.0 or (val == -1.0 and uncertain_policy == "u-ones"):
+                        has_pathology = True
+                        break
+            label = 1 if has_pathology else 0
+
+        # 3. Path resolution
+        rel_path_str = str(row["Path"]).lstrip("/")
+        # Handle cases where rel_path starts with 'CheXpert-v1.0-small/' or similar
+        cand_path = images_root_path / rel_path_str
+        if not cand_path.exists():
+            # Try stripping top directory component if present
+            parts = Path(rel_path_str).parts
+            if len(parts) > 1:
+                alt_path = images_root_path.joinpath(*parts[1:])
+                if alt_path.exists():
+                    cand_path = alt_path
+
         study = Study(
-            study_id=str(i),
-            frontal_image_path=str(Path(images_root) / row["Path"]),
-            report_text="",  # CheXpert has no free-text report, only labels
-            label=None,
-            metadata={"raw_row": row.to_dict()},
+            study_id=f"chexpert_{i}",
+            frontal_image_path=str(cand_path),
+            report_text=report_text,
+            label=label,
+            metadata={
+                "raw_row": row.to_dict(),
+                "uncertain_policy": uncertain_policy,
+                "dataset": "chexpert",
+            },
         )
         studies.append(study)
 

@@ -39,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src" / "evaluation"))
 
 import config
 from radiomics import extract_radiomics
-from xai_gradcam import derive_spatial_statistics
+from xai_gradcam import derive_spatial_statistics, extract_xai_features
 from vocabulary import extract_vocabulary_features, load_vocabulary
 from feature_card import build_feature_card, feature_card_to_prompt_text
 
@@ -101,13 +101,10 @@ def run_single(image_path: str, report_path: str, question: str):
 
     image = np.array(Image.open(image_path).convert("L"))
 
-    print("Extracting radiomics + vocabulary features (XAI requires a pretrained "
-          "classifier -- plug yours into src/features/xai_gradcam.py's GradCAM class)...")
+    print("Extracting radiomics, XAI (Grad-CAM), and vocabulary features...")
     rad = extract_radiomics(image)
     voc = extract_vocabulary_features(report_text)
-
-    # Placeholder XAI stats until you wire in a real pretrained CXR classifier.
-    xai = derive_spatial_statistics(np.random.default_rng(0).uniform(0.2, 0.8, size=(32, 32)))
+    xai = extract_xai_features(image)
 
     card = build_feature_card(rad, xai, voc)
     card_json = feature_card_to_prompt_text(card)
