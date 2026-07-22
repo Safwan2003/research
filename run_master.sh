@@ -43,8 +43,15 @@ fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
 
-pip install --upgrade pip >/dev/null
-pip install -r requirements.txt
+REQ_HASH="$(sha256sum requirements.txt | awk '{print $1}')"
+REQ_HASH_FILE="$MARKERS_DIR/requirements.sha256"
+if [ -f "$REQ_HASH_FILE" ] && [ "$(cat "$REQ_HASH_FILE")" = "$REQ_HASH" ]; then
+  echo "requirements.txt unchanged since last install -- skipping pip install."
+else
+  pip install --upgrade pip >/dev/null
+  pip install -r requirements.txt
+  echo "$REQ_HASH" > "$REQ_HASH_FILE"
+fi
 
 python3 -c "
 import torch, sys
@@ -60,8 +67,9 @@ sys.exit(0 if ok else 1)
 # --- 3. CheXpert dataset (idempotent, resumable) -----------------------------
 step "3/6 CheXpert dataset"
 if is_done chexpert_download; then
-  echo "Already downloaded (per $MARKERS_DIR/chexpert_download.done) -- skipping."
-  echo "Delete that marker file to force a re-download."
+  echo "Already fully downloaded (per $MARKERS_DIR/chexpert_download.done) --" \
+       "skipping entirely, no network call made."
+  echo "Delete that marker file to force a re-check."
 else
   if [ ! -f secrets/chexpert_sas_url.txt ]; then
     echo "Missing secrets/chexpert_sas_url.txt." >&2
@@ -86,8 +94,17 @@ else
     [ "$confirm" = "y" ] || exit 1
   fi
 
-  echo "Downloading CheXpert (this can take a long time depending on bandwidth)..."
-  azcopy copy "$(cat secrets/chexpert_sas_url.txt)" "data/chexpert" --recursive=true
+  # `sync` (not `copy`) is what makes this genuinely resumable: if this step
+  # gets interrupted partway (closed terminal, network drop, laptop sleep),
+  # re-running the whole script re-enters this branch (marker was never
+  # written) and `sync` compares size/last-modified against what's already in
+  # data/chexpert, re-fetching only files that are missing or incomplete --
+  # it does NOT restart the whole 471GB from zero. --delete-destination=false
+  # guarantees it will never remove anything already downloaded.
+  echo "Syncing CheXpert into data/chexpert (resumable -- already-downloaded" \
+       "files are left alone; only new/missing/incomplete ones are transferred)..."
+  azcopy sync "$(cat secrets/chexpert_sas_url.txt)" "data/chexpert" \
+    --recursive=true --delete-destination=false
   mark_done chexpert_download
 fi
 
