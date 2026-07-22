@@ -73,12 +73,21 @@ class GradCAM:
     The paper uses a DenseNet-121 backbone. For real chest X-ray results you
     want a model actually trained on chest X-rays (ImageNet weights alone
     won't produce medically meaningful attention). Two good options:
-      1. torchxrayvision (`pip install torchxrayvision`) -- ships DenseNet-121
-         models pretrained on CheXpert/NIH/MIMIC chest X-ray datasets.
-      2. A DenseNet-121 you or your professor already fine-tuned on OpenI/CheXpert.
+def get_torchxrayvision_classifier(model_name: str = "densenet121-res224-all", device: str = "cuda"):
     """
+    Helper to load a pretrained chest X-ray DenseNet-121 classifier from torchxrayvision.
+    Returns (model, target_layer).
+    """
+    import torch
+    import torchxrayvision as xrv
 
-    def __init__(self, model, target_layer):
+    model = xrv.models.DenseNet(weights=model_name).to(device).eval()
+    target_layer = model.features.denseblock4
+    return model, target_layer
+
+
+class GradCAM:
+
         import torch  # local import: only needed when actually running Grad-CAM
 
         self.torch = torch

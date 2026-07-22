@@ -103,13 +103,86 @@ def load_openi_dataset(reports_dir: str, images_dir: str, limit: Optional[int] =
     return studies
 
 
-def load_chexpert_dataset(csv_path: str, images_root: str, limit: Optional[int] = None) -> list:
+CHEXPERT_FINDING_COLUMNS = [
+    "No Finding",
+    "Enlarged Cardiomediastinum",
+    "Cardiomegaly",
+    "Lung Opacity",
+    "Lung Lesion",
+    "Edema",
+    "Consolidation",
+    "Pneumonia",
+    "Atelectasis",
+    "Pneumothorax",
+    "Pleural Effusion",
+    "Pleural Other",
+    "Fracture",
+    "Support Devices",
+]
+
+
+def _build_chexpert_pseudo_report(row) -> str:
+    """Build a pseudo-report string from CheXpert finding columns."""
+    import pandas as pd
+    parts = []
+    for col in CHEXPERT_FINDING_COLUMNS:
+        if col in row and not pd.isna(row[col]):
+            val = float(row[col])
+            if val == 1.0:
+                parts.append(f"{col}: positive")
+            elif val == 0.0:
+                parts.append(f"{col}: negative")
+            elif val == -1.0:
+                parts.append(f"{col}: uncertain")
+    if not parts:
+        return "No finding details provided."
+    return "; ".join(parts) + "."
+
+
+def _compute_chexpert_label(row, target_finding: str = "No Finding", uncertain_policy: str = "u-zeros") -> int:
+    """
+    Compute binary target label (0=normal, 1=abnormal) for CheXpert study.
+    By default, targets inverted 'No Finding' (1 = abnormal, 0 = normal).
+    """
+    import pandas as pd
+    if target_finding == "No Finding":
+        no_finding = row.get("No Finding")
+        if pd.isna(no_finding):
+            return 0
+        val = float(no_finding)
+        if val == 1.0:
+            return 0  # normal
+        elif val == 0.0:
+            return 1  # abnormal
+        else:  # -1.0 uncertain
+            return 0 if uncertain_policy == "u-zeros" else 1
+    else:
+        finding_val = row.get(target_finding)
+        if pd.isna(finding_val):
+            return 0
+        val = float(finding_val)
+        if val == 1.0:
+            return 1
+        elif val == 0.0:
+            return 0
+        else:
+            return 0 if uncertain_policy == "u-zeros" else 1
+
+
+def load_chexpert_dataset(
+    csv_path: str,
+    images_root: str,
+    limit: Optional[int] = None,
+    uncertain_policy: str = "u-zeros",
+    target_finding: str = "No Finding",
+) -> list:
     """
     Load CheXpert studies from the standard train.csv/valid.csv layout.
 
     CheXpert's CSV has one row per image with columns like "Path" and
     disease-finding columns (e.g. "Cardiomegaly", "Edema", ...) as 0/1/-1/blank.
-    Adjust `label_column` below to whichever finding you're evaluating against.
+    Populates report_text from free-text if available, or constructs a pseudo-report
+    from finding columns. Computes binary label (0=normal, 1=abnormal).
     """
     import pandas as pd
 
@@ -117,18 +190,30 @@ def load_chexpert_dataset(csv_path: str, images_root: str, limit: Optional[int] 
     if limit:
         df = df.head(limit)
 
+    images_root_path = Path(images_root)
     studies = []
     for i, row in df.iterrows():
+        rel_path = str(row["Path"])
+        img_path = images_root_path / rel_path
+
+        report_text = row.get("report_text") or row.get("Report") or _build_chexpert_pseudo_report(row)
+        label = _compute_chexpert_label(row, target_finding=target_finding, uncertain_policy=uncertain_policy)
+
         study = Study(
-            study_id=str(i),
-            frontal_image_path=str(Path(images_root) / row["Path"]),
-            report_text="",  # CheXpert has no free-text report, only labels
-            label=None,
-            metadata={"raw_row": row.to_dict()},
+            study_id=f"chexpert_{i}",
+            frontal_image_path=str(img_path),
+            report_text=report_text,
+            label=label,
+            metadata={
+                "raw_row": row.to_dict(),
+                "uncertain_policy": uncertain_policy,
+                "target_finding": target_finding,
+            },
         )
         studies.append(study)
 
     return studies
+
 
 
 if __name__ == "__main__":
