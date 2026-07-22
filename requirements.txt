@@ -1,0 +1,22 @@
+# --- Always needed (no GPU required) ---
+numpy
+scikit-image
+scikit-learn
+pandas
+rouge-score
+sacrebleu
+
+# --- Needed only for the actual VLM reasoning (Stage 3) and BERTScore ---
+# Install these in Colab / your GPU machine. They are heavy and/or need a
+# GPU to be useful, so they are kept separate from the lightweight deps above.
+torch
+torchvision
+transformers>=4.45.0
+accelerate
+qwen-vl-utils
+pillow
+bert-score
+
+# --- Optional: only if you use a pretrained chest X-ray classifier for
+# Grad-CAM instead of your own fine-tuned DenseNet-121 ---
+# torchxrayvision

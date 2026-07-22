@@ -1,0 +1,160 @@
+"""
+Main entry point. Run this after you've set up your environment (see README).
+
+Three modes:
+    python run_pipeline.py demo            -- runs Stage 1+2 (feature extraction
+                                               + feature card) on ONE synthetic
+                                               study, no GPU/dataset needed.
+                                               Good for confirming the pipeline
+                                               logic before you have real data.
+
+    python run_pipeline.py single --image path/to/xray.png --report path/to/report.txt
+                                            -- full Stage 1-3 on one real study:
+                                               extracts all features, builds the
+                                               feature card, and calls the VLM
+                                               in both baseline and context-driven
+                                               modes so you can compare them side
+                                               by side. REQUIRES GPU + Qwen2-VL.
+
+    python run_pipeline.py ablation        -- runs the Table 1-style AUC ablation
+                                               over your loaded dataset. Needs
+                                               real feature vectors + labels; edit
+                                               the TODO section below once your
+                                               data loading is wired up.
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent / "src" / "features"))
+sys.path.insert(0, str(Path(__file__).parent / "src" / "vlm"))
+sys.path.insert(0, str(Path(__file__).parent / "src" / "ablation"))
+sys.path.insert(0, str(Path(__file__).parent / "src" / "evaluation"))
+
+from radiomics import extract_radiomics
+from xai_gradcam import derive_spatial_statistics
+from vocabulary import extract_vocabulary_features, load_vocabulary
+from feature_card import build_feature_card, feature_card_to_prompt_text
+
+
+def run_demo():
+    """Stage 1 + 2 only, on synthetic data -- no GPU or dataset required."""
+    import numpy as np
+
+    print("Running Stage 1+2 demo on synthetic data (no GPU/dataset needed)...\n")
+
+    rng = np.random.default_rng(0)
+    synthetic_xray = rng.normal(120, 30, size=(256, 256)).clip(0, 255)
+    synthetic_gradcam_heatmap = rng.uniform(0.2, 0.9, size=(64, 64))
+    sample_report = (
+        "No focal consolidation, pleural effusion, or pneumothorax. "
+        "Cardiac silhouette within normal limits."
+    )
+
+    print("Step 1: extracting radiomics features (F_rad)...")
+    rad = extract_radiomics(synthetic_xray)
+    print(f"  -> {rad}\n")
+
+    print("Step 2: summarizing (synthetic) Grad-CAM map into XAI stats (F_xai)...")
+    print("  (in a real run, this heatmap comes from GradCAM() in src/vlm/../xai_gradcam.py")
+    print("   applied to a pretrained chest X-ray classifier)")
+    xai = derive_spatial_statistics(synthetic_gradcam_heatmap)
+    print(f"  -> {xai}\n")
+
+    print("Step 3: matching vocabulary terms in the report (F_voc)...")
+    voc = extract_vocabulary_features(sample_report)
+    print(f"  -> matched {voc['num_matched_terms']} terms: {voc['matched_terms']}\n")
+
+    print("Step 4: serializing into the feature card (F_tool = Serialize(F_rad, F_xai, F_voc))...")
+    card = build_feature_card(rad, xai, voc)
+    print(feature_card_to_prompt_text(card))
+
+    print(
+        "\nThis feature card is what gets inserted into the VLM prompt in "
+        "context-driven mode. Next step: run `single` mode with a real image "
+        "+ report + GPU to see the actual before/after VLM outputs."
+    )
+
+
+def run_single(image_path: str, report_path: str, question: str):
+    """
+    Full Stage 1-3 on one real study: extract features, build feature card,
+    then call the VLM in BOTH baseline and context-driven modes so you can
+    directly compare the "before" and "after" behavior your professor wants.
+
+    REQUIRES: torch, transformers, qwen-vl-utils, a GPU, and internet access
+    to download Qwen2-VL-2B-Instruct weights the first time.
+    """
+    from PIL import Image
+    import numpy as np
+    from reasoning import QwenVLReasoner
+
+    with open(report_path, "r") as f:
+        report_text = f.read()
+
+    image = np.array(Image.open(image_path).convert("L"))
+
+    print("Extracting radiomics + vocabulary features (XAI requires a pretrained "
+          "classifier -- plug yours into src/features/xai_gradcam.py's GradCAM class)...")
+    rad = extract_radiomics(image)
+    voc = extract_vocabulary_features(report_text)
+
+    # Placeholder XAI stats until you wire in a real pretrained CXR classifier.
+    xai = derive_spatial_statistics(np.random.default_rng(0).uniform(0.2, 0.8, size=(32, 32)))
+
+    card = build_feature_card(rad, xai, voc)
+    card_json = feature_card_to_prompt_text(card)
+
+    print("\nLoading Qwen2-VL (this downloads weights on first run)...")
+    reasoner = QwenVLReasoner()
+
+    print("\n=== BASELINE (before): Y(0) = f_theta(I, R) ===")
+    baseline_output = reasoner.baseline_reasoning(image_path, question, report_text)
+    print(baseline_output)
+
+    print("\n=== CONTEXT-DRIVEN (after): Y = f_theta(I, R, F_tool) ===")
+    context_output = reasoner.context_aligned_reasoning(image_path, question, report_text, card_json)
+    print(context_output)
+
+
+def run_ablation():
+    """
+    Table 1-style AUC ablation. This needs real feature vectors and labels --
+    fill in the TODO below once your dataset loading (src/data/dataset.py) and
+    text-embedding step are wired up.
+    """
+    print(
+        "TODO: load your dataset via src/data/dataset.py, extract radiomics + "
+        "XAI + text-embedding feature vectors for every study, then call:\n\n"
+        "    from src.ablation.ablation_study import run_ablation, print_ablation_table\n"
+        "    results = run_ablation(radiomics_features, xai_features, text_embeddings, labels)\n"
+        "    print_ablation_table(results)\n\n"
+        "See src/ablation/ablation_study.py's __main__ block for a working "
+        "synthetic-data example you can adapt."
+    )
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Context-aligned medical VLM pipeline")
+    subparsers = parser.add_subparsers(dest="mode", required=True)
+
+    subparsers.add_parser("demo", help="Run Stage 1+2 on synthetic data (no GPU needed)")
+
+    single_parser = subparsers.add_parser("single", help="Run full pipeline on one real study (needs GPU)")
+    single_parser.add_argument("--image", required=True, help="Path to chest X-ray image")
+    single_parser.add_argument("--report", required=True, help="Path to text file with the radiology report")
+    single_parser.add_argument(
+        "--question", default="Is there evidence of active cardiopulmonary abnormality?"
+    )
+
+    subparsers.add_parser("ablation", help="Run Table 1-style AUC ablation study")
+
+    args = parser.parse_args()
+
+    if args.mode == "demo":
+        run_demo()
+    elif args.mode == "single":
+        run_single(args.image, args.report, args.question)
+    elif args.mode == "ablation":
+        run_ablation()

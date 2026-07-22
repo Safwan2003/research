@@ -1,0 +1,41 @@
+pleural effusion
+pneumothorax
+consolidation
+cardiomegaly
+atelectasis
+edema
+pulmonary edema
+infiltrate
+opacity
+nodule
+mass
+lesion
+fracture
+effusion
+emphysema
+fibrosis
+pneumonia
+cardiac silhouette
+mediastinum
+mediastinal widening
+hilar
+costophrenic angle
+pleural thickening
+pneumomediastinum
+subcutaneous emphysema
+interstitial marking
+air bronchogram
+bronchiectasis
+calcification
+osseous abnormality
+degenerative changes
+scoliosis
+hyperinflation
+hilar enlargement
+lymphadenopathy
+tracheal deviation
+pulmonary vascular congestion
+airspace disease
+ground glass opacity
+pleural scarring
+diaphragm elevation
