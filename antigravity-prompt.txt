@@ -63,8 +63,9 @@ rather than working around it.
 
 ## CheXpert data + loader gap (shared infrastructure — whoever gets there first does it, the other pulls the result)
 
-Get access: https://stanfordmlgroup.github.io/competitions/chexpert/ requires
-a data-use-agreement/registration (unlike OpenI). Check with the professor
+Get access: https://stanfordmlgroup.github.io/competitions/chexpert/ or
+https://aimi.stanford.edu/datasets/chexpert-chest-x-rays — both require a
+data-use-agreement/registration (unlike OpenI). Check with the professor
 first — the lab may already have a copy on a shared drive/server, or you may
 need to register yourselves. The smaller "CheXpert-small" release is fine to
 start with; you don't need the full-resolution ~440GB version.

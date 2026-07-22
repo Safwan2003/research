@@ -12,7 +12,8 @@ evaluation) just needs a list of Study objects.
 Where to get the data:
   - OpenI: https://openi.nlm.nih.gov/faq (public, has paired frontal/lateral
     X-rays + free-text radiology reports in XML)
-  - CheXpert: https://stanfordmlgroup.github.io/competitions/chexpert/
+  - CheXpert: https://stanfordmlgroup.github.io/competitions/chexpert/ or
+    https://aimi.stanford.edu/datasets/chexpert-chest-x-rays
     (requires a data use agreement / registration -- ask your professor if
     the lab already has a copy on a shared drive/server)
 """
