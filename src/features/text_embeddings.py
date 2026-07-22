@@ -29,8 +29,18 @@ def extract_text_embeddings(texts: list, model_name: str = "sentence-transformer
         (N, D) numpy array of embeddings.
     """
     from sentence_transformers import SentenceTransformer
+    import torch
 
-    model = SentenceTransformer(model_name)
+    device = "cpu"
+    if torch.cuda.is_available():
+        try:
+            model = SentenceTransformer(model_name, device="cuda")
+            embeddings = model.encode(texts, show_progress_bar=False, convert_to_numpy=True)
+            return embeddings
+        except Exception:
+            pass
+
+    model = SentenceTransformer(model_name, device="cpu")
     embeddings = model.encode(texts, show_progress_bar=False, convert_to_numpy=True)
     return embeddings
 

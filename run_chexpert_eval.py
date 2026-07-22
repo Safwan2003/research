@@ -85,8 +85,13 @@ def _get_reasoner(model_family: str, synthetic: bool):
 def _load_real_studies(n: int, uncertain_policy: str):
     from dataset import load_chexpert_dataset
 
+    csv_path = config.CHEXPERT_CSV_PATH
+    valid_csv = config.CHEXPERT_IMAGES_ROOT / "valid.csv"
+    if valid_csv.exists():
+        csv_path = valid_csv
+
     return load_chexpert_dataset(
-        csv_path=str(config.CHEXPERT_CSV_PATH),
+        csv_path=str(csv_path),
         images_root=str(config.CHEXPERT_IMAGES_ROOT),
         limit=n,
         uncertain_policy=uncertain_policy,

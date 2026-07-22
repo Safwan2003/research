@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "runs": [
+    {
+      "run_id": "527d4285-bfaf-4034-b525-6937c77a86dd",
+      "timestamp_utc": "2026-07-22T09:07:44.160857+00:00",
+      "git_commit": "2524369c19862c5138b5e5f9d6c91a8fb7814f62",
+      "host": "FBS-WS68-RESEARCHLAB",
+      "mode": "ablation",
+      "config_snapshot": {
+        "seed": 42,
+        "n_studies": 1000,
+        "dataset": "chexpert",
+        "model_family": "qwen2-vl",
+        "text_embedding_source": "synthetic",
+        "synthetic": true
+      },
+      "results": {
+        "ablation": {
+          "Radiomics only": 0.7142188528576747,
+          "XAI only": 0.628532727222302,
+          "Text only": 1.0,
+          "Radiomics + Text": 1.0,
+          "XAI + Text": 1.0,
+          "Radiomics + XAI + Text": 1.0
+        }
+      },
+      "notes": ""
+    },
+    {
+      "run_id": "664de590-1048-4efa-bb22-7d813592d832",
+      "timestamp_utc": "2026-07-22T09:07:47.404759+00:00",
+      "git_commit": "2524369c19862c5138b5e5f9d6c91a8fb7814f62",
+      "host": "FBS-WS68-RESEARCHLAB",
+      "mode": "hallucination",
+      "config_snapshot": {
+        "seed": 42,
+        "n_studies": 50,
+        "dataset": "chexpert",
+        "model_family": "qwen2-vl",
+        "synthetic": true
+      },
+      "results": {
+        "hallucination": {
+          "Image + Text (baseline Y0)": 1.5,
+          "Image + Text + Radiomics + XAI (Y2)": 1.0
+        }
+      },
+      "notes": ""
+    },
+    {
+      "run_id": "220bc479-3adb-4116-8ad8-ad48c23e2fca",
+      "timestamp_utc": "2026-07-22T09:07:47.469400+00:00",
+      "git_commit": "2524369c19862c5138b5e5f9d6c91a8fb7814f62",
+      "host": "FBS-WS68-RESEARCHLAB",
+      "mode": "agentic_reasoning",
+      "config_snapshot": {
+        "seed": 42,
+        "n_studies": 50,
+        "dataset": "chexpert",
+        "model_family": "qwen2-vl",
+        "synthetic": true
+      },
+      "results": {
+        "agentic_reasoning": {
+          "step0_vs_step1": {
+            "step1": {
+              "uncertainty_mean": 0.6986662146834279,
+              "uncertainty_std": 0.09270699613802455,
+              "evidence_length_mean": 5,
+              "evidence_length_std": 0.0,
+              "presence_limitations": 1.0,
+              "presence_safety_notes": 1.0
+            }
+          },
+          "step2": {
+            "uncertainty_mean": 0.6975531240147153,
+            "uncertainty_std": 0.09869627996797943,
+            "evidence_length_mean": 5,
+            "evidence_length_std": 0.0,
+            "presence_limitations": 1.0,
+            "presence_safety_notes": 1.0
+          }
+        }
+      },
+      "notes": ""
+    },
+    {
+      "run_id": "5d210d91-8d0b-48a6-9449-9cb0adf56455",
+      "timestamp_utc": "2026-07-22T09:07:47.528359+00:00",
+      "git_commit": "2524369c19862c5138b5e5f9d6c91a8fb7814f62",
+      "host": "FBS-WS68-RESEARCHLAB",
+      "mode": "text_metrics",
+      "config_snapshot": {
+        "seed": 42,
+        "n_studies": 50,
+        "dataset": "chexpert",
+        "model_family": "qwen2-vl",
+        "synthetic": true
+      },
+      "results": {
+        "text_metrics": {
+          "rouge1": 0.09090909090909087,
+          "rouge2": 0.0,
+          "rougeL": 0.09090909090909087,
+          "sacrebleu": 3.7068733803831906,
+          "phi_pct": 0.0,
+          "unsafe_pct": 0.0,
+          "unc_rate": 0.0
+        }
+      },
+      "notes": ""
+    }
+  ]
+}

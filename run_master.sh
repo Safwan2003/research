@@ -53,7 +53,7 @@ else
   echo "$REQ_HASH" > "$REQ_HASH_FILE"
 fi
 
-python3 -c "
+.venv/bin/python3.9 -c "
 import torch, sys
 ok = torch.cuda.is_available()
 print('CUDA available:', ok, '-', torch.cuda.get_device_name(0) if ok else 'no GPU visible to torch')
@@ -126,7 +126,7 @@ echo "Using model: $MODEL"
 
 # --- 5. Run the CheXpert evaluation pipeline ---------------------------------
 step "5/6 Running CheXpert evaluation ($MODEL)"
-python3 run_chexpert_eval.py \
+.venv/bin/python3.9 run_chexpert_eval.py \
   --model "$MODEL" \
   --n-ablation "${N_ABLATION:-1000}" \
   --n-agentic "${N_AGENTIC:-50}"

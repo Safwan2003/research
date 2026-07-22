@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Append-only JSON experiment log.
 
