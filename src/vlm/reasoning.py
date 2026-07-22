@@ -28,21 +28,23 @@ class QwenVLReasoner:
     reasoning, following Section 4.3 of the paper.
     """
 
-    def __init__(self, model_name: str = "Qwen/Qwen2-VL-2B-Instruct", device: str = "cuda"):
-        # Imports are local so that everything ELSE in this project can be
-        # imported/tested without requiring torch/transformers to be installed.
+    def __init__(self, model_name: str = "Qwen/Qwen2-VL-2B-Instruct", device: str = "cpu"):
         import torch
         from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 
         self.torch = torch
         self.device = device
+
+        dtype = torch.float16 if device == "cuda" else torch.float32
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
-            model_name, torch_dtype=torch.float16, device_map=device
-        )
+            model_name, dtype=dtype
+        ).to(self.device)
         self.processor = AutoProcessor.from_pretrained(model_name)
 
     def _generate(self, image_path: str, prompt_text: str, max_new_tokens: int = 256) -> str:
         """Run one forward generation pass given an image path + prompt text."""
+        from qwen_vl_utils import process_vision_info
+
         messages = [
             {
                 "role": "user",
@@ -56,12 +58,24 @@ class QwenVLReasoner:
         text = self.processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
+        image_inputs, video_inputs = process_vision_info(messages)
         inputs = self.processor(
-            text=[text], images=[image_path], padding=True, return_tensors="pt"
+            text=[text],
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
         ).to(self.device)
 
-        generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
-        generated_ids_trimmed = generated_ids[:, inputs.input_ids.shape[1]:]
+        try:
+            generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
+        except Exception as e:
+            print(f"[Warning] Generation on {self.device} failed: {e}. Falling back to CPU execution...")
+            self.device = "cpu"
+            self.model = self.model.to("cpu").to(self.torch.float32)
+            inputs = {k: v.to("cpu") if hasattr(v, "to") else v for k, v in inputs.items()}
+            generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
+        generated_ids_trimmed = generated_ids[:, inputs.input_ids.shape[1] :]
         output_text = self.processor.batch_decode(
             generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=True
         )[0]

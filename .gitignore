@@ -5,3 +5,12 @@ __pycache__/
 .ipynb_checkpoints/
 .claude/
 .gemini/
+
+# Local secrets -- never commit SAS tokens / API keys / DUA-gated download URLs
+.env
+*.sas_url
+secrets/
+
+# Downloaded datasets and run_master.sh's resume markers -- local-only, not code
+/data/
+.setup_markers/

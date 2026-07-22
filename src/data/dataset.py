@@ -119,6 +119,38 @@ def load_openi_dataset(reports_dir: str, images_dir: str, limit: Optional[int] =
     return studies
 
 
+_CHEXPERT_FINDING_COLUMNS = [
+    "Enlarged Cardiomediastinum", "Cardiomegaly", "Lung Opacity", "Lung Lesion",
+    "Edema", "Consolidation", "Pneumonia", "Atelectasis", "Pneumothorax",
+    "Pleural Effusion", "Pleural Other", "Fracture", "Support Devices",
+]
+
+
+def _build_chexpert_pseudo_report(row: dict, uncertain_policy: str = "u_zeros") -> str:
+    """
+    CheXpert ships only structured 0/1/-1/blank finding labels, not free-text
+    reports -- Section 4.1 of the paper describes this as CheXpert's content
+    being "shorter and more label-centric" than OpenI's free-text reports.
+    """
+    if row.get("No Finding") == 1 or row.get("No Finding") == 1.0:
+        return "No Finding. No acute cardiopulmonary abnormality."
+
+    parts = []
+    for col in _CHEXPERT_FINDING_COLUMNS:
+        val = row.get(col)
+        if val == 1.0 or val == 1:
+            parts.append(f"{col}: positive;")
+        elif val == -1.0 or val == -1:
+            if uncertain_policy == "u-ones" or uncertain_policy == "u_ones":
+                parts.append(f"{col}: positive;")
+            else:
+                parts.append(f"{col}: negative;")
+        elif val == 0.0 or val == 0:
+            parts.append(f"{col}: negative;")
+
+    return " ".join(parts) if parts else "No Finding."
+
+
 def load_chexpert_dataset(
     csv_path: str,
     images_root: str,
@@ -141,69 +173,37 @@ def load_chexpert_dataset(
     if limit:
         df = df.head(limit)
 
-    finding_cols = [
-        "Enlarged Cardiomediastinum",
-        "Cardiomegaly",
-        "Lung Opacity",
-        "Lung Lesion",
-        "Edema",
-        "Consolidation",
-        "Pneumonia",
-        "Atelectasis",
-        "Pneumothorax",
-        "Pleural Effusion",
-        "Pleural Other",
-        "Fracture",
-        "Support Devices",
-        "No Finding",
-    ]
-
     studies = []
     images_root_path = Path(images_root)
 
     for i, row in df.iterrows():
+        row_dict = row.to_dict()
+        
         # 1. Report text resolution
         if "Report" in row and pd.notna(row["Report"]) and str(row["Report"]).strip():
             report_text = str(row["Report"]).strip()
         elif "findings" in row and pd.notna(row["findings"]) and str(row["findings"]).strip():
             report_text = str(row["findings"]).strip()
         else:
-            # Generate pseudo-report from finding columns
-            parts = []
-            for col in finding_cols:
-                if col in row and pd.notna(row[col]):
-                    val = float(row[col])
-                    if val == 1.0:
-                        status = "positive"
-                    elif val == 0.0:
-                        status = "negative"
-                    elif val == -1.0:
-                        status = "negative" if uncertain_policy == "u-zeros" else "positive"
-                    else:
-                        continue
-                    parts.append(f"{col}: {status}")
-            report_text = "; ".join(parts) + "." if parts else "No findings documented."
+            report_text = _build_chexpert_pseudo_report(row_dict, uncertain_policy)
 
         # 2. Binary Ground Truth Label (0 = Normal, 1 = Abnormal)
-        if "No Finding" in row and pd.notna(row["No Finding"]) and float(row["No Finding"]) == 1.0:
+        no_finding = row_dict.get("No Finding")
+        if no_finding == 1.0 or no_finding == 1:
             label = 0
         else:
-            # Check if any pathology is positive (or uncertain if u-ones)
             has_pathology = False
-            for col in finding_cols[:-1]:  # exclude 'No Finding'
-                if col in row and pd.notna(row[col]):
-                    val = float(row[col])
-                    if val == 1.0 or (val == -1.0 and uncertain_policy == "u-ones"):
-                        has_pathology = True
-                        break
+            for col in _CHEXPERT_FINDING_COLUMNS:
+                val = row_dict.get(col)
+                if val == 1.0 or val == 1 or (val == -1 and (uncertain_policy == "u-ones" or uncertain_policy == "u_ones")):
+                    has_pathology = True
+                    break
             label = 1 if has_pathology else 0
 
         # 3. Path resolution
         rel_path_str = str(row["Path"]).lstrip("/")
-        # Handle cases where rel_path starts with 'CheXpert-v1.0-small/' or similar
         cand_path = images_root_path / rel_path_str
         if not cand_path.exists():
-            # Try stripping top directory component if present
             parts = Path(rel_path_str).parts
             if len(parts) > 1:
                 alt_path = images_root_path.joinpath(*parts[1:])
@@ -216,7 +216,7 @@ def load_chexpert_dataset(
             report_text=report_text,
             label=label,
             metadata={
-                "raw_row": row.to_dict(),
+                "raw_row": row_dict,
                 "uncertain_policy": uncertain_policy,
                 "dataset": "chexpert",
             },
@@ -227,15 +227,4 @@ def load_chexpert_dataset(
 
 
 if __name__ == "__main__":
-    print(
-        "This module is a skeleton -- point load_openi_dataset()/load_chexpert_dataset() "
-        "at your actual data directories once your professor gives you access.\n"
-        "Example:\n\n"
-        "    studies = load_openi_dataset(\n"
-        "        reports_dir='data/openi/reports',\n"
-        "        images_dir='data/openi/images',\n"
-        "        limit=10,  # start small while debugging\n"
-        "    )\n"
-        "    print(f'Loaded {len(studies)} studies')\n"
-        "    print(studies[0])\n"
-    )
+    print("CheXpert dataset module ready.")

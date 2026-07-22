@@ -17,6 +17,6 @@ qwen-vl-utils
 pillow
 bert-score
 
-# --- Optional: only if you use a pretrained chest X-ray classifier for
-# Grad-CAM instead of your own fine-tuned DenseNet-121 ---
-# torchxrayvision
+# --- Needed for run_chexpert_eval.py's real (non --synthetic) mode ---
+torchxrayvision      # pretrained chest X-ray classifier for real Grad-CAM (Known Gap #1)
+sentence-transformers  # text embeddings for the Table 1 ablation's "text" modality
