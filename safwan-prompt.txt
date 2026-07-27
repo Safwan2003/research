@@ -14,41 +14,40 @@ Every result you log via results_store.append_run must set
 
 ## CURRENT FOCUS: CheXpert (Known Gap #6) — do this first, before anything OpenI-specific
 
-Read antigravity-prompt.txt's "CheXpert data + loader gap" section first —
-it covers getting access, and fixing `load_chexpert_dataset()`'s two stubs
-(empty report_text, null label). That part is shared infra; coordinate with
-Ammar so it's not done twice.
+This is now automated. From the repo root:
 
-Once CheXpert data loads correctly as `Study` objects:
+    MODEL=qwen2-vl bash run_master.sh
+    # or just: bash run_master.sh   (and pick [1] Qwen2-VL at the prompt)
 
-1. **GradCAM classifier.** Plug a real pretrained chest X-ray classifier into
-   src/features/xai_gradcam.py's GradCAM usage — use `torchxrayvision`
-   (pretrained on CheXpert/NIH/MIMIC) since no lab fine-tuned DenseNet-121 is
-   available yet. Wire it into run_pipeline.py's run_single().
+That handles GPU check, environment setup, the CheXpert download (once
+you've put your SAS URL in secrets/chexpert_sas_url.txt — see
+antigravity-prompt.txt), the GradCAM classifier (torchxrayvision, wired into
+run_chexpert_eval.py's feature extraction), the Table-1-style ablation, and
+hallucination/agentic-reasoning/text-metrics evaluation — logging everything
+to results/experiment_log.json. `load_chexpert_dataset()`'s old stubs
+(empty report_text, null label) are already fixed.
 
-2. **Ablation study, Qwen text-embedding column, on CheXpert.** Extract
-   radiomics + XAI + Qwen-derived text embeddings (over whatever
-   report_text you built per the loader-gap fix) for your CheXpert subset,
-   then call `run_ablation()` in src/ablation/ablation_study.py. Target
-   shape (Section 5.4): radiomics ~0.71 AUC BEATS text ~0.50 here — the
-   reverse of OpenI's pattern. That's the paper's own reported finding, not
-   a bug — don't "fix" it if you see it. Log with `mode="ablation"`,
-   `config_snapshot={"model_family": "qwen2-vl", "dataset": "chexpert", ...}`.
+Target numbers to sanity-check your run's ablation output against (Section
+5.4): radiomics ~0.71 AUC should BEAT text ~0.50 here — the reverse of
+OpenI's pattern. That's the paper's own reported finding, not a bug — don't
+treat it as one if you see it. The paper doesn't give exact target numbers
+for CheXpert's hallucination/Table 3/4-style metrics (those tables are
+OpenI-only) — the point there is whether the same qualitative trend holds
+(context alignment still reduces hallucination / stays calibrated), not
+hitting specific values.
 
-3. **Hallucination + agentic reasoning on a CheXpert subset.** Same
-   evaluation functions as OpenI would use: run
-   `QwenVLReasoner.stepwise_agentic_reasoning()` over a sample of CheXpert
-   studies, then `hallucination.average_hallucination_rate()`,
-   `responsible_ai_metrics.compute_agentic_reasoning_stats()` (step0 vs
-   step1), and `compute_responsible_ai_indicators()` +
-   `text_metrics.evaluate_batch()`. The paper doesn't give exact target
-   numbers for CheXpert here (Tables 2/3/4 are OpenI-only) — the point is to
-   see whether the SAME qualitative trend holds (context alignment still
-   reduces hallucination / stays calibrated), not to hit specific values.
-   Log each with `config_snapshot={"model_family": "qwen2-vl", "dataset": "chexpert", ...}`.
+If you want a smaller/faster run first to sanity-check the pipeline before
+committing to the full 1,000/50-study run:
 
-Stage 3 single-study sanity check (`python run_pipeline.py single --image
-<path> --report <path>`) works the same regardless of dataset — use a
+    MODEL=qwen2-vl N_ABLATION=100 N_AGENTIC=10 bash run_master.sh
+
+To run the 7B variant for the Table 4 Qwen2-VL-7B row instead of the default
+2B, edit `VLM_MODEL_NAME` in config.py to `"Qwen/Qwen2-VL-7B-Instruct"`
+before running (or pass it through if you add a flag for it — currently
+config.py is the single source of truth for which Qwen checkpoint loads).
+
+A single-study sanity check outside the master script is still available:
+`python run_pipeline.py single --image <path> --report <path>` — use a
 CheXpert image/report pair for this instead of OpenI's.
 
 ## Deferred until CheXpert is done: OpenI (Known Gaps #1-5)

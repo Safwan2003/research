@@ -64,46 +64,39 @@ class GradCAM:
     matching Eqs. (4)-(5) of the paper.
 
     Usage:
-        model = load_pretrained_densenet121_for_cxr()   # see note below
-        cam = GradCAM(model, target_layer=model.features.denseblock4)
+        model, target_layer = load_torchxrayvision_classifier()
+        cam = GradCAM(model, target_layer)
         heatmap = cam(image_tensor, class_idx=0)         # numpy array, HxW, in [0, 1]
         stats = derive_spatial_statistics(heatmap)
 
     Note on the pretrained classifier:
     The paper uses a DenseNet-121 backbone. For real chest X-ray results you
     want a model actually trained on chest X-rays (ImageNet weights alone
-    won't produce medically meaningful attention). Two good options:
-def get_torchxrayvision_classifier(model_name: str = "densenet121-res224-all", device: str = "cuda"):
+    won't produce medically meaningful attention) -- see
+    `load_torchxrayvision_classifier()` below.
     """
-    Helper to load a pretrained chest X-ray DenseNet-121 classifier from torchxrayvision.
-    Returns (model, target_layer).
-    """
-    import torch
-    import torchxrayvision as xrv
 
-    model = xrv.models.DenseNet(weights=model_name).to(device).eval()
-    target_layer = model.features.denseblock4
-    return model, target_layer
-
-
-class GradCAM:
-
+    def __init__(self, model, target_layer):
         import torch  # local import: only needed when actually running Grad-CAM
 
         self.torch = torch
         self.model = model.eval()
         self.target_layer = target_layer
         self.activations = None
-        self.gradients = None
 
         target_layer.register_forward_hook(self._save_activation)
-        target_layer.register_full_backward_hook(self._save_gradient)
 
     def _save_activation(self, module, input, output):
-        self.activations = output.detach()
-
-    def _save_gradient(self, module, grad_input, grad_output):
-        self.gradients = grad_output[0].detach()
+        # Capture the activation itself (not detached) and ask autograd to
+        # populate .grad on it during backward(). We deliberately do NOT use
+        # register_full_backward_hook here: torchxrayvision's DenseNet121
+        # applies F.relu(..., inplace=True) to this exact tensor right after
+        # this hook fires, which trips PyTorch's view+inplace autograd safety
+        # check ("Output 0 of BackwardHookFunction is a view and is being
+        # modified inplace") whenever a backward hook is attached. retain_grad()
+        # sidesteps that entirely since it doesn't need the pre-mutation view.
+        self.activations = output
+        output.retain_grad()
 
     def __call__(self, image_tensor, class_idx: int = None) -> np.ndarray:
         """
@@ -125,10 +118,13 @@ class GradCAM:
         score = output[:, class_idx].sum()
         score.backward()
 
+        activations = self.activations.detach()
+        gradients = self.activations.grad.detach()
+
         # alpha_k^c = global-average-pooled gradient for channel k  (Eq. 4)
-        weights = self.gradients.mean(dim=(2, 3), keepdim=True)
+        weights = gradients.mean(dim=(2, 3), keepdim=True)
         # L_GradCAM = ReLU(sum_k alpha_k^c * A^k)                    (Eq. 5)
-        cam = (weights * self.activations).sum(dim=1, keepdim=True)
+        cam = (weights * activations).sum(dim=1, keepdim=True)
         cam = torch.relu(cam)
 
         cam = torch.nn.functional.interpolate(
@@ -147,6 +143,58 @@ def extract_xai_features(image_tensor, model, target_layer, class_idx: int = Non
     cam_fn = GradCAM(model, target_layer)
     heatmap = cam_fn(image_tensor, class_idx=class_idx)
     return derive_spatial_statistics(heatmap)
+
+
+def load_torchxrayvision_classifier(weights: str = "densenet121-res224-all"):
+    """
+    Closes Known Gap #1: loads a DenseNet-121 actually pretrained on real
+    chest X-ray datasets (CheXpert/NIH/MIMIC/PadChest/...) via
+    `torchxrayvision`, instead of ImageNet weights (which produce
+    medically meaningless Grad-CAM attention).
+
+    Requires: pip install torchxrayvision (needs internet on first run to
+    download weights).
+
+    NOTE: torchxrayvision's internal module names have changed across
+    versions. This targets `model.features` (the DenseNet growth path,
+    mirroring torchvision's DenseNet121 structure) as the Grad-CAM target
+    layer. If your installed version differs, run `print(model)` once and
+    adjust `target_layer` to whatever the last convolutional block is
+    actually called.
+
+    Returns:
+        (model, target_layer) -- pass directly into GradCAM(model, target_layer).
+    """
+    import torchxrayvision as xrv
+
+    model = xrv.models.DenseNet(weights=weights)
+    model.eval()
+    target_layer = model.features
+    return model, target_layer
+
+
+def preprocess_for_torchxrayvision(image: "np.ndarray") -> "torch.Tensor":
+    """
+    Preprocess a raw grayscale X-ray array into the format
+    torchxrayvision's models expect: normalized to [-1024, 1024], resized to
+    224x224, shape (1, 1, 224, 224).
+
+    Args:
+        image: 2D numpy array (H, W), raw grayscale pixel values.
+
+    Returns:
+        torch.Tensor, shape (1, 1, 224, 224), ready for GradCAM's image_tensor arg.
+    """
+    import torch
+    import torchxrayvision as xrv
+    from skimage.transform import resize
+
+    img = image.astype(np.float64)
+    img = xrv.datasets.normalize(img, maxval=img.max() if img.max() > 0 else 255)
+    img = resize(img, (224, 224), anti_aliasing=True)
+    tensor = torch.from_numpy(img).float().unsqueeze(0).unsqueeze(0)
+    tensor.requires_grad_(True)
+    return tensor
 
 
 if __name__ == "__main__":

@@ -1,0 +1,185 @@
+================================================================================
+CONTEXT-ALIGNED MEDICAL VLM -- COMPLETE COMMAND REFERENCE
+================================================================================
+Run everything below from Windows PowerShell, in the project folder:
+    cd C:\Users\cslabadmin\Desktop\research
+
+All heavy lifting (Python, torch, GPU, azcopy) happens inside WSL Ubuntu --
+these commands either call wsl.exe directly or go through run_master.bat,
+which launches run_master.sh inside WSL for you.
+
+
+--------------------------------------------------------------------------------
+1. ONE-TIME ENVIRONMENT SETUP (libraries + GPU check)
+--------------------------------------------------------------------------------
+Already done on this machine, but if you ever need to redo it from scratch:
+
+    wsl -d Ubuntu -- bash -lc "cd /mnt/c/Users/cslabadmin/Desktop/research && python3 -m venv .venv && source .venv/bin/activate && pip install --upgrade pip && pip install -r requirements.txt"
+
+Verify GPU is visible to torch:
+
+    wsl -d Ubuntu -- bash -lc "cd /mnt/c/Users/cslabadmin/Desktop/research && source .venv/bin/activate && python3 -c \"import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))\""
+
+System packages needed once (Triton JIT compiler dependencies -- requires your
+Ubuntu password, run these yourself so you can type it):
+
+    wsl -d Ubuntu -- sudo apt-get update
+    wsl -d Ubuntu -- sudo apt-get install -y build-essential python3-dev
+
+
+--------------------------------------------------------------------------------
+2. DATASET -- CheXpert
+--------------------------------------------------------------------------------
+Your SAS URL must already be saved at secrets/chexpert_sas_url.txt (done).
+
+2a. Small validation-set download (486MB, already done -- run_master.bat's
+    step 3/6 does this automatically and skips it if already present):
+
+    wsl -d Ubuntu -- bash -lc "cd /mnt/c/Users/cslabadmin/Desktop/research && source .venv/bin/activate && python3 scripts/extract_chexpert_batch1.py"
+
+    This gives you: data/chexpert/valid.csv (234 real studies, images included)
+                     data/chexpert/train.csv (223k rows of metadata, no images yet)
+
+2b. Grow the training set toward the paper's 1000-study scale (smart partial
+    download -- pulls ONLY the needed images out of a 162GB zip via HTTP range
+    requests, never downloads the whole thing). Safe to run in its own
+    terminal while you evaluate in another; resumable if interrupted:
+
+    wsl -d Ubuntu -- bash -lc "cd /mnt/c/Users/cslabadmin/Desktop/research && source .venv/bin/activate && python3 scripts/download_chexpert_subset.py --n-studies 1000"
+
+    Takes roughly 1-2 hours for 1000 studies (a few seconds per image).
+    Re-run the same command any time to resume/top up.
+
+    NOTE: once this has fetched >= your target study count, tell Claude to
+    switch config.py's CHEXPERT_CSV_PATH from valid.csv to train.csv so runs
+    actually use the bigger set.
+
+
+--------------------------------------------------------------------------------
+3. MODELS -- pre-download so runs never stall mid-way
+--------------------------------------------------------------------------------
+Qwen2-VL-2B-Instruct (default backbone) + the DenseNet-121 Grad-CAM classifier
+download automatically the first time you run the pipeline (step 5/6 below) --
+already cached on this machine.
+
+To also pre-download the paper's other models (Qwen2-VL-7B, LLaVA-1.5-7B, and
+a BLIP checkpoint) ahead of time (~30GB total, pure disk cache, no GPU used,
+safe to run alongside anything else):
+
+    wsl -d Ubuntu -- bash -lc 'cd /mnt/c/Users/cslabadmin/Desktop/research && source .venv/bin/activate && export HF_TOKEN=$(grep HF_TOKEN .env | cut -d= -f2) && python3 scripts/download_all_paper_models.py 2>&1 | tee /tmp/model_download.log'
+
+    Uses the HF_TOKEN saved in .env (gitignored -- never commit that file) to
+    get authenticated Hugging Face rate limits, which matters a lot here --
+    anonymous downloads of these large multi-GB shards were repeatedly
+    stalling partway through. If you ever need to redo the .env file:
+        wsl -d Ubuntu -- bash -lc "cd /mnt/c/Users/cslabadmin/Desktop/research && printf 'HF_TOKEN=YOUR_TOKEN_HERE\n' > .env"
+    (get a free Read-scope token at huggingface.co/settings/tokens)
+
+    - Qwen2-VL-7B: config.py's VLM_MODEL_NAME can point here for the paper's
+      Table 4 "7B" row.
+    - LLaVA-1.5-7B: Ammar's track (reasoning_llava.py already targets it).
+    - BLIP: weights only -- not yet wired into ablation_study.py as an actual
+      text-embedding option (separate follow-up dev work, not just a download).
+
+    Don't load two 7B models onto the GPU at the same time (16GB VRAM) --
+    coordinate with Ammar if he's also on this machine.
+
+
+--------------------------------------------------------------------------------
+4. RUN THE SYSTEM -- CheXpert evaluation (Qwen2-VL)
+--------------------------------------------------------------------------------
+This is the main entry point: GPU check -> library check -> dataset check ->
+model select -> runs the ablation study + agentic reasoning + hallucination +
+text-quality metrics -> appends everything to results/experiment_log.json.
+
+Quick small test (few minutes, good for sanity-checking after any change):
+
+    $env:MODEL = "qwen2-vl"
+    $env:N_ABLATION = "20"
+    $env:N_AGENTIC = "5"
+    .\run_master.bat
+
+Full real run at the paper's intended scale (234 currently-available real
+studies for ablation, 50 for agentic reasoning -- ~25-30 minutes):
+
+    $env:MODEL = "qwen2-vl"
+    $env:N_ABLATION = "234"
+    $env:N_AGENTIC = "50"
+    .\run_master.bat
+
+Once train.csv has enough real images (see step 2b) and config.py has been
+switched to it, bump N_ABLATION up toward 1000 to match the paper exactly.
+
+To run the LLaVA-1.5-7B track instead:
+
+    $env:MODEL = "llava-1.5-7b"
+    $env:N_ABLATION = "234"
+    $env:N_AGENTIC = "50"
+    .\run_master.bat
+
+
+--------------------------------------------------------------------------------
+5. FINE-TUNING COMPARISON (frozen vs LoRA vs QLoRA vs full) -- beyond the paper
+--------------------------------------------------------------------------------
+The paper's own model (f_theta) is always FROZEN -- Section 3, Eq. 3. This
+section is an extension beyond the paper: it fine-tunes LoRA and QLoRA
+adapters, and also does a full (every-parameter) fine-tune, all starting
+from the same Qwen2-VL-2B backbone, and compares all four regimes side by
+side on the exact same metrics (Tables 1-4 style) the paper defines.
+
+Run everything (rerun the frozen baseline with the fixed CheXpert
+label-leakage bug, train + evaluate LoRA, train + evaluate QLoRA, train +
+evaluate full fine-tuning, compile one comparison report) from Windows
+PowerShell:
+
+    $env:N_ABLATION = "1000"
+    $env:N_AGENTIC = "50"
+    $env:N_FINETUNE_STUDIES = "300"
+    $env:EPOCHS = "1"
+    $env:RUN_FULL_FT = "1"
+    .\run_finetune_pipeline.bat
+
+Full fine-tuning trains ALL ~2B parameters and is by far the most VRAM-
+hungry regime, even with gradient checkpointing + an 8-bit optimizer (see
+src/vlm/finetune_qwen.py's run_finetune docstring). If it OOMs on your
+RTX 5060 Ti, set $env:RUN_FULL_FT = "0" and re-run -- you'll still get the
+frozen/LoRA/QLoRA comparison, just without the full-FT row.
+
+Safe to re-run -- each step is skipped if already done (same .setup_markers/
+convention as run_master.bat). Steps can also be run one at a time inside
+WSL if you want more control:
+
+    wsl -d Ubuntu -- bash -lc "cd /mnt/c/Users/cslabadmin/Desktop/research && source .venv/bin/activate && python3 run_chexpert_eval.py --model qwen2-vl --n-ablation 1000 --n-agentic 50"
+    wsl -d Ubuntu -- bash -lc "cd /mnt/c/Users/cslabadmin/Desktop/research && source .venv/bin/activate && python3 src/vlm/finetune_qwen.py --regime lora --n-studies 300 --epochs 1"
+    wsl -d Ubuntu -- bash -lc "cd /mnt/c/Users/cslabadmin/Desktop/research && source .venv/bin/activate && python3 run_chexpert_eval.py --model qwen2-vl --n-ablation 1000 --n-agentic 50 --adapter-path models/lora_chexpert_2b --finetune-regime lora"
+    wsl -d Ubuntu -- bash -lc "cd /mnt/c/Users/cslabadmin/Desktop/research && source .venv/bin/activate && python3 src/vlm/finetune_qwen.py --regime qlora --n-studies 300 --epochs 1"
+    wsl -d Ubuntu -- bash -lc "cd /mnt/c/Users/cslabadmin/Desktop/research && source .venv/bin/activate && python3 run_chexpert_eval.py --model qwen2-vl --n-ablation 1000 --n-agentic 50 --adapter-path models/qlora_chexpert_2b --finetune-regime qlora"
+    wsl -d Ubuntu -- bash -lc "cd /mnt/c/Users/cslabadmin/Desktop/research && source .venv/bin/activate && python3 src/vlm/finetune_qwen.py --regime full --n-studies 300 --epochs 1"
+    wsl -d Ubuntu -- bash -lc "cd /mnt/c/Users/cslabadmin/Desktop/research && source .venv/bin/activate && python3 run_chexpert_eval.py --model qwen2-vl --n-ablation 1000 --n-agentic 50 --model-path models/full_chexpert_2b --finetune-regime full"
+    wsl -d Ubuntu -- bash -lc "cd /mnt/c/Users/cslabadmin/Desktop/research && source .venv/bin/activate && python3 scripts/compile_finetune_comparison.py"
+
+Output: results/finetune_comparison_report.md -- the file to send your
+professor. It's regenerated fresh from results/experiment_log.json every
+time, never hand-edited.
+
+
+--------------------------------------------------------------------------------
+6. USEFUL CHECKS / TROUBLESHOOTING
+--------------------------------------------------------------------------------
+Check GPU status any time:
+
+    wsl -d Ubuntu -- nvidia-smi
+
+Check what's actually running (if something looks stuck):
+
+    wsl -d Ubuntu -- bash -lc "ps aux | grep python3"
+
+Run the pipeline in synthetic mode (no GPU/data needed -- verifies plumbing
+only, useful if something breaks and you want to isolate real-data issues):
+
+    wsl -d Ubuntu -- bash -lc "cd /mnt/c/Users/cslabadmin/Desktop/research && source .venv/bin/activate && python3 run_chexpert_eval.py --synthetic --n-ablation 50 --n-agentic 5"
+
+View the latest logged results:
+
+    wsl -d Ubuntu -- bash -lc "cd /mnt/c/Users/cslabadmin/Desktop/research && tail -c 3000 results/experiment_log.json"
+================================================================================

@@ -6,6 +6,19 @@ __pycache__/
 .claude/
 .gemini/
 .venv/
-data/
 *.tgz
 *.zip
+
+# Local secrets -- never commit SAS tokens / API keys / DUA-gated download URLs
+.env
+*.sas_url
+secrets/
+
+# Downloaded datasets and run_master.sh's resume markers -- local-only, not code
+/data/
+.setup_markers/
+
+# Trained LoRA/QLoRA adapters and full-fine-tune checkpoints (src/vlm/finetune_qwen.py
+# output) -- can be several GB, machine-specific, and reproducible from the training
+# script + logged config_snapshot, so not committed.
+/models/

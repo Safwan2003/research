@@ -50,7 +50,16 @@ def run_ablation(
         ),
     }
 
-    cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+    # StratifiedKFold requires n_splits <= the smallest class's sample count --
+    # relevant for quick small-N sanity-check runs, not the paper's 1000/50
+    # study scale where n_folds=5 always has enough headroom.
+    smallest_class_count = int(np.bincount(labels.astype(int)).min())
+    effective_folds = max(2, min(n_folds, smallest_class_count))
+    if effective_folds < n_folds:
+        print(f"  NOTE: reducing ablation cv folds from {n_folds} to {effective_folds} "
+              f"(smallest class has only {smallest_class_count} samples).")
+
+    cv = StratifiedKFold(n_splits=effective_folds, shuffle=True, random_state=random_state)
     results = {}
 
     for name, X in configs.items():

@@ -28,7 +28,23 @@ class QwenVLReasoner:
     reasoning, following Section 4.3 of the paper.
     """
 
-    def __init__(self, model_name: str = "Qwen/Qwen2-VL-2B-Instruct", device: str = "cuda"):
+    def __init__(
+        self, model_name: str = "Qwen/Qwen2-VL-2B-Instruct", device: str = "cuda",
+        adapter_path: str = None, load_in_4bit: bool = False,
+    ):
+        """
+        Args:
+            model_name: base checkpoint (this is `f_theta`'s weights -- always
+                the paper's frozen backbone, whether or not an adapter is
+                attached below).
+            adapter_path: optional path/repo-id of a peft LoRA/QLoRA adapter
+                (produced by src/vlm/finetune_qwen.py) to load on top of the
+                base model. None (default) reproduces the paper's setup
+                exactly: fully frozen f_theta, no adapter.
+            load_in_4bit: load the base model in 4-bit (bitsandbytes NF4) --
+                match this to how the adapter was trained (True for a QLoRA
+                adapter, False for LoRA or frozen-only).
+        """
         # Imports are local so that everything ELSE in this project can be
         # imported/tested without requiring torch/transformers to be installed.
         import torch
@@ -36,9 +52,29 @@ class QwenVLReasoner:
 
         self.torch = torch
         self.device = device
-        self.model = Qwen2VLForConditionalGeneration.from_pretrained(
-            model_name, torch_dtype=torch.float16, device_map=device
-        )
+        self.adapter_path = adapter_path
+
+        if load_in_4bit:
+            from transformers import BitsAndBytesConfig
+            quant_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,
+            )
+            self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+                model_name, quantization_config=quant_config, device_map=device
+            )
+        else:
+            self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+                model_name, torch_dtype=torch.float16, device_map=device
+            )
+
+        if adapter_path:
+            from peft import PeftModel
+            self.model = PeftModel.from_pretrained(self.model, adapter_path)
+
+        self.model.eval()
         self.processor = AutoProcessor.from_pretrained(model_name)
 
     def _generate(self, image_path: str, prompt_text: str, max_new_tokens: int = 256) -> str:

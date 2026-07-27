@@ -2,80 +2,61 @@ LLaVA-1.5-7B track. Read antigravity-prompt.txt FIRST for shared environment
 setup (WSL/CUDA check, install steps, results-log conventions) — this file
 only covers what's specific to your model.
 
-Unlike Qwen2-VL, there is currently NO LLaVA wrapper in this repo — only
-src/vlm/reasoning.py's QwenVLReasoner exists. Your first task is to build the
-LLaVA equivalent, then use it to close the same evaluation gaps Safwan is
-closing for Qwen2-VL, so both columns of the paper's tables get reproduced.
+A LLaVA wrapper (`LlavaVLReasoner`, see Task 0 below) already exists
+alongside src/vlm/reasoning.py's QwenVLReasoner — use it to close the same
+evaluation gaps Safwan is closing for Qwen2-VL, so both columns of the
+paper's tables get reproduced.
 
 Every result you log via results_store.append_run must set
 `config_snapshot["model_family"] = "llava-1.5-7b"`.
 
-## Task 0: build src/vlm/reasoning_llava.py
+## Task 0: build src/vlm/reasoning_llava.py — already done
 
-Create a `LlavaVLReasoner` class that mirrors QwenVLReasoner's public
-interface exactly (same method names/signatures), so it's a drop-in
-replacement wherever QwenVLReasoner is used:
-
-  - `__init__(self, model_name="llava-hf/llava-1.5-7b-hf", device="cuda")`
-  - `baseline_reasoning(image_path, question, report_text) -> str`
-  - `context_aligned_reasoning(image_path, question, report_text, feature_card_json) -> dict`
-  - `stepwise_agentic_reasoning(image_path, question, report_text, radiomics_json, feature_card_json) -> dict`
-  - reuse the SAME prompt builders from src/vlm/prompts.py
-    (build_baseline_prompt / build_context_aligned_prompt /
-    build_stepwise_prompts) and the same `_safe_parse_json` JSON-extraction
-    logic — don't duplicate that, import/reuse it.
-
-Model loading differs from Qwen2-VL: use `transformers.LlavaForConditionalGeneration`
-and `transformers.AutoProcessor` with `llava-hf/llava-1.5-7b-hf`. Follow the
-repo convention of keeping `import torch` / `from transformers import ...`
-local to `__init__`, not at module top-level. The chat-template and image-input
-call pattern may differ slightly from Qwen2-VL's processor — check the actual
-LlavaProcessor API in the installed transformers version (requirements.txt
-pins transformers>=4.45.0) rather than assuming it's identical to Qwen2-VL's;
-adapt `_generate()`'s internals to whatever that processor actually expects,
-while keeping the public method signatures identical to QwenVLReasoner's.
-
-Give it the same `if __name__ == "__main__":` self-test-explanation block as
-reasoning.py (it can't run standalone without GPU either).
+`src/vlm/reasoning_llava.py`'s `LlavaVLReasoner` now exists, mirroring
+QwenVLReasoner's public interface exactly (baseline_reasoning /
+context_aligned_reasoning / stepwise_agentic_reasoning), reusing the same
+prompt builders and `_safe_parse_json` logic rather than duplicating them.
+It uses `transformers.LlavaForConditionalGeneration` + `AutoProcessor` with
+`llava-hf/llava-1.5-7b-hf`. It has NOT been run against a real GPU yet (this
+was written without one available) — if `_generate()`'s processor calls
+don't match your installed transformers version's actual LlavaProcessor API,
+fix that file's `_generate()` method; the public method signatures should
+stay identical to QwenVLReasoner's so `run_chexpert_eval.py --model
+llava-1.5-7b` keeps working as a drop-in.
 
 ## CURRENT FOCUS: CheXpert (Known Gap #6) — do this first, before anything OpenI-specific
 
-Read antigravity-prompt.txt's "CheXpert data + loader gap" section first —
-it covers getting access, and fixing `load_chexpert_dataset()`'s two stubs
-(empty report_text, null label). That part is shared infra; coordinate with
-Safwan so it's not done twice.
+This is now automated. From the repo root:
 
-Once CheXpert data loads correctly as `Study` objects:
+    MODEL=llava-1.5-7b bash run_master.sh
+    # or just: bash run_master.sh   (and pick [2] LLaVA-1.5-7B at the prompt)
 
-1. **GradCAM classifier** — shared infra with Safwan's track, same
-   coordination note as above (torchxrayvision into
-   src/features/xai_gradcam.py).
-2. Run your new LlavaVLReasoner (Task 0 above) on one real CheXpert
-   image/report pair: baseline vs context-driven output, confirm the
-   structured-JSON behavior shows up (shorter evidence, calibrated
-   uncertainty, non-empty limitations/safety_note).
-3. **Ablation study, BLIP text-embedding column, on CheXpert.** Note: Table 1
-   compares "Qwen" vs "BLIP" text-embedding columns, NOT LLaVA — the paper's
-   Figure 2 caption is explicit about this; you're contributing the BLIP
-   column regardless of which VLM you use for reasoning. Extract radiomics +
-   XAI + BLIP-derived text embeddings (over whatever report_text Safwan/you
-   built per the loader-gap fix) for your CheXpert subset, then call
-   `run_ablation()` in src/ablation/ablation_study.py. Target shape
-   (Section 5.4): radiomics should beat text here — the reverse of OpenI's
-   pattern (paper's OpenI "BLIP" column: text-only ~0.925, radiomics-only
-   ~0.564 — expect that relationship to flip on CheXpert like it does for
-   Qwen's ~0.71 vs ~0.50). That's the paper's own reported finding, not a
-   bug — don't "fix" it if you see it. Log with `mode="ablation"`,
-   `config_snapshot={"model_family": "llava-1.5-7b", "text_embedding_source": "blip", "dataset": "chexpert", ...}`.
-4. **Hallucination + agentic reasoning on a CheXpert subset.** Use your
-   `LlavaVLReasoner.stepwise_agentic_reasoning()` over a sample of CheXpert
-   studies, then `hallucination.average_hallucination_rate()`,
-   `responsible_ai_metrics.compute_agentic_reasoning_stats()` (step0 vs
-   step1), and `compute_responsible_ai_indicators()` +
-   `text_metrics.evaluate_batch()`. The paper doesn't give exact target
-   numbers for CheXpert here (Tables 2/3/4 are OpenI-only) — the point is to
-   see whether the same qualitative trend holds, not to hit specific values.
-   Log with `config_snapshot={"model_family": "llava-1.5-7b", "dataset": "chexpert", ...}`.
+That handles GPU check, environment setup, the CheXpert download (once
+you've put your SAS URL in secrets/chexpert_sas_url.txt — see
+antigravity-prompt.txt), the GradCAM classifier (torchxrayvision, wired into
+run_chexpert_eval.py's feature extraction), the ablation study, and
+hallucination/agentic-reasoning/text-metrics evaluation using your
+LlavaVLReasoner — logging everything to results/experiment_log.json.
+`load_chexpert_dataset()`'s old stubs (empty report_text, null label) are
+already fixed.
+
+Note on Table 1: it compares "Qwen" vs "BLIP" text-embedding columns, NOT
+LLaVA — `run_chexpert_eval.py` currently uses sentence-transformers for the
+ablation's text-embedding feature regardless of which VLM you pick (tagged
+`text_embedding_source` in the logged config_snapshot), which is an
+approximation of the paper's exact Qwen/BLIP columns, not a literal
+reproduction — flag this if it matters for how the professor wants results
+presented. Target shape either way (Section 5.4): radiomics should beat text
+on CheXpert — the reverse of OpenI's pattern. That's the paper's own
+reported finding, not a bug. The paper doesn't give exact target numbers for
+CheXpert's hallucination/Table 3/4-style metrics (those tables are
+OpenI-only) — the point there is whether the same qualitative trend holds,
+not hitting specific values.
+
+If you want a smaller/faster run first to sanity-check the pipeline before
+committing to the full 1,000/50-study run:
+
+    MODEL=llava-1.5-7b N_ABLATION=100 N_AGENTIC=10 bash run_master.sh
 
 ## Deferred until CheXpert is done: OpenI (Known Gaps #1-5)
 
