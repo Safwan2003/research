@@ -135,11 +135,67 @@ class GradCAM:
         return cam
 
 
-def extract_xai_features(image_tensor, model, target_layer, class_idx: int = None) -> dict:
+def load_cxr_classifier(model_name: str = "densenet121-res224-all"):
+    """
+    Load a pretrained chest X-ray classifier using torchxrayvision or torchvision DenseNet-121.
+    Returns (model, target_layer).
+    """
+    try:
+        import torchxrayvision as xrv
+        model = xrv.models.DenseNet(weights=model_name)
+        model.eval()
+        if hasattr(model, "model") and hasattr(model.model, "features"):
+            target_layer = model.model.features
+        elif hasattr(model, "features"):
+            target_layer = model.features
+        else:
+            target_layer = list(model.children())[0]
+        return model, target_layer
+    except ImportError:
+        import torchvision.models as models
+        model = models.densenet121(weights=models.DenseNet121_Weights.DEFAULT)
+        model.eval()
+        target_layer = model.features
+        return model, target_layer
+
+
+def extract_xai_features(image_or_tensor, model=None, target_layer=None, class_idx: int = None) -> dict:
     """
     Convenience entry point matching Frad/Fxai/Fvoc naming used elsewhere in
     this project: run Grad-CAM, then summarize into F_xai.
+
+    Args:
+        image_or_tensor: 2D numpy array image (H, W) or PyTorch tensor (1, C, H, W).
+        model: optional PyTorch classifier. If None, auto-loads torchxrayvision DenseNet.
+        target_layer: optional target layer for Grad-CAM.
+        class_idx: optional target class index.
     """
+    import torch
+
+    if model is None or target_layer is None:
+        model, target_layer = load_cxr_classifier()
+
+    if isinstance(image_or_tensor, np.ndarray):
+        img = image_or_tensor.astype(np.float32)
+        if img.max() > 1.0:
+            img = img / 255.0
+        if img.ndim == 2:
+            img = img[None, None, :, :]
+        elif img.ndim == 3:
+            img = img[None, :, :, :]
+        tensor = torch.from_numpy(img)
+        if tensor.shape[-2:] != (224, 224):
+            tensor = torch.nn.functional.interpolate(tensor, size=(224, 224), mode="bilinear", align_corners=False)
+        if hasattr(model, "pathologies"):
+            tensor = tensor * 2048.0 - 1024.0
+        elif tensor.shape[1] == 1:
+            tensor = tensor.repeat(1, 3, 1, 1)
+        image_tensor = tensor
+    else:
+        image_tensor = image_or_tensor
+        if image_tensor.ndim == 4 and image_tensor.shape[1] == 1 and not hasattr(model, "pathologies"):
+            image_tensor = image_tensor.repeat(1, 3, 1, 1)
+
     cam_fn = GradCAM(model, target_layer)
     heatmap = cam_fn(image_tensor, class_idx=class_idx)
     return derive_spatial_statistics(heatmap)

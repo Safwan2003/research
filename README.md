@@ -115,13 +115,37 @@ which has a fully working synthetic-data example. Once you have:
 ...call `run_ablation(radiomics_features, xai_features, text_embeddings, labels)`
 directly to get the Table 1 AUC numbers.
 
-### 4. Getting the datasets
+### 4. Getting the datasets & Pre-downloading models
 
-- **OpenI**: public, no registration needed. https://openi.nlm.nih.gov/faq
-  Has paired frontal/lateral X-rays + XML radiology reports — exactly what
-  `src/data/dataset.py`'s `load_openi_dataset()` expects.
-- **CheXpert**: requires a Stanford data use agreement. Ask your professor
-  if the lab already has a local copy (most labs working on this do).
+- **CheXpert (CURRENT FOCUS)**:
+  Download automatically via Stanford's Azure Blob Storage SAS link:
+  ```bash
+  python src/data/download_chexpert.py
+  ```
+  Extracts `CheXpert-v1.0 batch 1 (validate & csv).zip` and `CheXpert-v1.0 batch 2 (train 1).zip` directly into `data/chexpert/`.
+  
+  Test the CheXpert dataset loader:
+  ```bash
+  python src/data/test_chexpert_loader.py
+  ```
+
+- **OpenI**:
+  Download automatically from NIH:
+  ```bash
+  python src/data/download_openi.py
+  ```
+
+- **Qwen2-VL Model Weights**:
+  Pre-cache Qwen2-VL model weights into `.cache/huggingface`:
+  ```bash
+  python src/vlm/download_models.py
+  ```
+
+- **Feature Extraction Verification**:
+  Verify Stage 1 + 2 feature extraction ($F_{rad}$ + $F_{xai}$ Grad-CAM + $F_{voc}$) on real CheXpert images:
+  ```bash
+  python src/features/test_chexpert_features.py
+  ```
 
 ## What "context-driven" actually changes (so you know what to look for)
 
@@ -144,5 +168,3 @@ OpenI. If your professor asks you to also validate cross-dataset, don't be
 alarmed if your OpenI-tuned intuitions flip on CheXpert — that's a genuine,
 reported finding about how report richness changes which modality carries
 more signal, not a bug in your code.
-
-# research

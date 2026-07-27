@@ -66,10 +66,20 @@ fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
 
-info "Installing/upgrading pip + requirements.txt (safe to re-run, pip skips satisfied deps) ..."
-pip install --upgrade pip >/dev/null
-pip install -r requirements.txt
-ok "All packages from requirements.txt installed."
+# Skip the (slow) pip install if requirements.txt hasn't changed since the
+# last successful run -- pip itself would no-op too, but hashing is faster
+# than letting pip re-resolve/re-check ~20 packages every single run.
+REQ_HASH="$(sha256sum requirements.txt | awk '{print $1}')"
+REQ_HASH_FILE="$MARKERS_DIR/requirements.sha256"
+if [ -f "$REQ_HASH_FILE" ] && [ "$(cat "$REQ_HASH_FILE")" = "$REQ_HASH" ]; then
+  info "requirements.txt unchanged since last install -- skipping pip install."
+else
+  info "Installing/upgrading pip + requirements.txt ..."
+  pip install --upgrade pip >/dev/null
+  pip install -r requirements.txt
+  echo "$REQ_HASH" > "$REQ_HASH_FILE"
+  ok "All packages from requirements.txt installed."
+fi
 
 info "Checking torch sees the GPU ..."
 python3 -c "
@@ -86,6 +96,11 @@ sys.exit(0 if ok else 1)
 step_done "environment ready"
 
 # --- 3. CheXpert dataset (smart, disk-aware download) ------------------------
+# NOTE: this deliberately does NOT `azcopy sync` the full ~471GB CheXpert
+# release -- only batch 1 (~486MB, csvs + validation images) is fetched here.
+# Growing beyond that is scripts/download_chexpert_subset.py's job (HTTP range
+# requests into the remote zip, fetching only the N studies you ask for) --
+# see step 3's N_TRAIN_EXTRA handling below and COMMANDS.txt section 2b.
 banner "3/6 CheXpert dataset"
 mkdir -p data/chexpert
 

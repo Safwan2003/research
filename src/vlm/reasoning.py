@@ -29,14 +29,17 @@ class QwenVLReasoner:
     """
 
     def __init__(
-        self, model_name: str = "Qwen/Qwen2-VL-2B-Instruct", device: str = "cuda",
+        self, model_name: str = "Qwen/Qwen2-VL-2B-Instruct", device: str = "cpu",
         adapter_path: str = None, load_in_4bit: bool = False,
     ):
         """
         Args:
             model_name: base checkpoint (this is `f_theta`'s weights -- always
                 the paper's frozen backbone, whether or not an adapter is
-                attached below).
+                attached below). Defaults to "cpu" so this class is safe to
+                instantiate on a machine with no GPU (see _generate()'s CPU
+                fallback below); config.py's VLM_DEVICE ("cuda") is what
+                actually drives real runs.
             adapter_path: optional path/repo-id of a peft LoRA/QLoRA adapter
                 (produced by src/vlm/finetune_qwen.py) to load on top of the
                 base model. None (default) reproduces the paper's setup
@@ -66,9 +69,12 @@ class QwenVLReasoner:
                 model_name, quantization_config=quant_config, device_map=device
             )
         else:
+            # float16 needs a GPU to be meaningful/fast; fall back to float32
+            # on CPU (float16 matmul on CPU is often unsupported or very slow).
+            dtype = torch.float16 if device == "cuda" else torch.float32
             self.model = Qwen2VLForConditionalGeneration.from_pretrained(
-                model_name, torch_dtype=torch.float16, device_map=device
-            )
+                model_name, dtype=dtype
+            ).to(self.device)
 
         if adapter_path:
             from peft import PeftModel
@@ -79,6 +85,8 @@ class QwenVLReasoner:
 
     def _generate(self, image_path: str, prompt_text: str, max_new_tokens: int = 256) -> str:
         """Run one forward generation pass given an image path + prompt text."""
+        from qwen_vl_utils import process_vision_info
+
         messages = [
             {
                 "role": "user",
@@ -92,12 +100,24 @@ class QwenVLReasoner:
         text = self.processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
+        image_inputs, video_inputs = process_vision_info(messages)
         inputs = self.processor(
-            text=[text], images=[image_path], padding=True, return_tensors="pt"
+            text=[text],
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
         ).to(self.device)
 
-        generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
-        generated_ids_trimmed = generated_ids[:, inputs.input_ids.shape[1]:]
+        try:
+            generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
+        except Exception as e:
+            print(f"[Warning] Generation on {self.device} failed: {e}. Falling back to CPU execution...")
+            self.device = "cpu"
+            self.model = self.model.to("cpu").to(self.torch.float32)
+            inputs = {k: v.to("cpu") if hasattr(v, "to") else v for k, v in inputs.items()}
+            generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
+        generated_ids_trimmed = generated_ids[:, inputs.input_ids.shape[1] :]
         output_text = self.processor.batch_decode(
             generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=True
         )[0]

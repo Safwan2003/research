@@ -39,47 +39,55 @@ def _parse_openi_xml(xml_path: Path) -> Study:
     """
     Parse a single OpenI XML report file into a Study object.
 
-    OpenI XML reports typically contain <AbstractText Label="FINDINGS"> and
-    <AbstractText Label="IMPRESSION"> sections, plus <parentImage id="..."/>
-    references to the associated image files. Adjust the tag names below if
-    your copy of OpenI is structured differently (versions vary).
+    OpenI XML reports contain <AbstractText Label="..."> sections (FINDINGS, IMPRESSION)
+    and <parentImage id="..."> elements. Also extracts binary ground-truth label:
+      0 = normal (Normal tag present / no major abnormalities)
+      1 = abnormal (abnormality tags or findings present)
     """
     tree = ET.parse(xml_path)
     root = tree.getroot()
 
     findings, impression = "", ""
     for abstract in root.iter("AbstractText"):
-        label = abstract.get("Label", "").upper()
+        label = (abstract.get("Label") or abstract.get("label") or "").upper()
         text = (abstract.text or "").strip()
-        if label == "FINDINGS":
+        if "FINDING" in label:
             findings = text
-        elif label == "IMPRESSION":
+        elif "IMPRESSION" in label:
             impression = text
 
     report_text = f"{findings} {impression}".strip()
 
-    image_ids = [img.get("id") for img in root.iter("parentImage")]
+    # Image IDs
+    image_ids = []
+    for img in root.iter("parentImage"):
+        img_id = img.get("id")
+        if img_id:
+            image_ids.append(img_id)
+
+    # Determine ground-truth label (0 = Normal, 1 = Abnormal)
+    major_tags = [elem.text.lower() for elem in root.iter() if elem.tag in ("major", "MeSH", "term") and elem.text]
+    all_text = (report_text + " " + " ".join(major_tags)).lower()
+
+    if "normal" in major_tags or "no acute cardiopulmonary process" in all_text or "unremarkable" in all_text:
+        study_label = 0
+    elif any(term in all_text for term in ["cardiomegaly", "effusion", "pneumothorax", "opacity", "consolidation", "atelectasis", "edema", "granuloma", "infiltrate", "calcinosis"]):
+        study_label = 1
+    else:
+        study_label = 0 if "normal" in all_text else 1
 
     return Study(
         study_id=xml_path.stem,
         report_text=report_text,
-        metadata={"image_ids": image_ids},
+        label=study_label,
+        metadata={"image_ids": image_ids, "major_tags": major_tags},
     )
 
 
 def load_openi_dataset(reports_dir: str, images_dir: str, limit: Optional[int] = None) -> list:
     """
     Load OpenI studies from a directory of XML report files + a directory of
-    associated PNG/JPG images.
-
-    Args:
-        reports_dir: path to folder containing per-study .xml report files.
-        images_dir: path to folder containing the corresponding image files.
-        limit: optionally cap the number of studies loaded (useful while
-               developing/debugging, before running on the full 1,000-study set).
-
-    Returns:
-        list of Study objects.
+    associated PNG images.
     """
     reports_dir = Path(reports_dir)
     images_dir = Path(images_dir)
@@ -93,10 +101,18 @@ def load_openi_dataset(reports_dir: str, images_dir: str, limit: Optional[int] =
         study = _parse_openi_xml(xml_path)
 
         image_ids = study.metadata.get("image_ids", [])
-        if len(image_ids) >= 1:
-            study.frontal_image_path = str(images_dir / f"{image_ids[0]}.png")
-        if len(image_ids) >= 2:
-            study.lateral_image_path = str(images_dir / f"{image_ids[1]}.png")
+        # Resolve image paths if files exist
+        valid_img_paths = []
+        for img_id in image_ids:
+            # Check with or without .png extension
+            cand = images_dir / f"{img_id}.png" if not img_id.endswith(".png") else images_dir / img_id
+            if cand.exists():
+                valid_img_paths.append(str(cand))
+
+        if valid_img_paths:
+            study.frontal_image_path = valid_img_paths[0]
+            if len(valid_img_paths) > 1:
+                study.lateral_image_path = valid_img_paths[1]
 
         studies.append(study)
 
@@ -135,14 +151,17 @@ def _build_chexpert_pseudo_report(row: dict, target_finding: str, uncertain_poli
     this does.
 
     IMPORTANT: `target_finding` (the exact column `_compute_chexpert_label`
-    reads) is deliberately excluded here. An earlier version of this function
-    echoed EVERY finding column -- including the one being predicted -- into
-    this text, so the "text" feature used by the ablation study's logistic
-    regression was trivially reconstructing its own label (Text-only AUC came
-    out ~1.0 on every real run, and CheXpert's expected radiomics-beats-text
+    reads) is deliberately excluded here, and there is NO blanket "No
+    Finding" shortcut either. An earlier version of this function echoed
+    EVERY finding column -- including the one being predicted -- into this
+    text (and short-circuited on "No Finding", which is just as informative
+    about the target since it implies every pathology column is negative),
+    so the "text" feature used by the ablation study's logistic regression
+    was trivially reconstructing its own label (Text-only AUC came out ~1.0
+    on every real run, and CheXpert's expected radiomics-beats-text
     reversal, Section 5.4, never showed up). Excluding the target column
-    means any AUC the text embedding achieves now reflects genuine comorbidity
-    signal in the OTHER finding columns, not a shortcut.
+    means any AUC the text embedding achieves now reflects genuine
+    comorbidity signal in the OTHER finding columns, not a shortcut.
 
     Args:
         row: one row of the CheXpert CSV as a dict (column name -> value).
@@ -178,7 +197,7 @@ def load_chexpert_dataset(
     target_finding: str = DEFAULT_CHEXPERT_TARGET_FINDING,
 ) -> list:
     """
-    Load CheXpert studies from the standard train.csv/valid.csv layout.
+    Load CheXpert studies from a CSV file (e.g., train.csv / valid.csv).
 
     CheXpert's CSV has one row per image with columns like "Path", "No
     Finding", and 13 other disease-finding columns as 0/1/-1/blank.
@@ -186,13 +205,20 @@ def load_chexpert_dataset(
     label: binary presence/absence of `target_finding` (default
     "Cardiomegaly", one of CheXpert's standard single-pathology benchmark
     targets), from `_compute_chexpert_label`. This is what feeds the Table
-    1-style ablation's logistic regression.
+    1-style ablation's logistic regression. Deliberately NOT the global
+    "No Finding" abnormal/normal flag used in an earlier version -- see
+    _compute_chexpert_label's docstring for why that leaks against
+    report_text below.
 
-    report_text: since CheXpert has no free-text reports, this is a
-    label-derived pseudo-report (see _build_chexpert_pseudo_report) so F_voc
-    and text-embedding extraction have real input instead of an empty string.
-    `target_finding` itself is excluded from this text -- see that function's
-    docstring for why (avoids the text feature trivially leaking the label).
+    report_text: prefers a real free-text "Report"/"findings" column if the
+    CSV actually has one (some CheXpert exports do); otherwise falls back to
+    a label-derived pseudo-report (see _build_chexpert_pseudo_report) so
+    F_voc and text-embedding extraction have real input instead of an empty
+    string. `target_finding` itself is always excluded from the pseudo-report
+    fallback -- see that function's docstring for why (avoids the text
+    feature trivially leaking the label). The real-report case doesn't have
+    this concern: real radiology text legitimately correlating with the
+    diagnosis is genuine signal, not an engineered shortcut.
     """
     import pandas as pd
 
@@ -202,16 +228,43 @@ def load_chexpert_dataset(
 
     images_root_path = Path(images_root)
     studies = []
+    images_root_path = Path(images_root)
+
     for i, row in df.iterrows():
         row_dict = row.to_dict()
         label = _compute_chexpert_label(row_dict, target_finding, uncertain_policy)
 
+        # Prefer a real free-text report column if the CSV actually has one
+        # (some CheXpert exports do) -- only fall back to the synthetic,
+        # leakage-free pseudo-report when there's no real text to use.
+        if "Report" in row and pd.notna(row["Report"]) and str(row["Report"]).strip():
+            report_text = str(row["Report"]).strip()
+        elif "findings" in row and pd.notna(row["findings"]) and str(row["findings"]).strip():
+            report_text = str(row["findings"]).strip()
+        else:
+            report_text = _build_chexpert_pseudo_report(row_dict, target_finding, uncertain_policy)
+
+        # Path resolution: try the CSV's path as-is, then with a leading
+        # path component stripped (handles both "CheXpert-v1.0/train/..."
+        # and images_root already pointing at the "CheXpert-v1.0" dir).
+        rel_path_str = str(row["Path"]).lstrip("/")
+        cand_path = images_root_path / rel_path_str
+        if not cand_path.exists():
+            parts = Path(rel_path_str).parts
+            if len(parts) > 1:
+                alt_path = images_root_path.joinpath(*parts[1:])
+                if alt_path.exists():
+                    cand_path = alt_path
+
         study = Study(
-            study_id=str(i),
-            frontal_image_path=str(images_root_path / row["Path"]),
-            report_text=_build_chexpert_pseudo_report(row_dict, target_finding, uncertain_policy),
+            study_id=f"chexpert_{i}",
+            frontal_image_path=str(cand_path),
+            report_text=report_text,
             label=label,
-            metadata={"raw_row": row_dict, "uncertain_policy": uncertain_policy, "target_finding": target_finding},
+            metadata={
+                "raw_row": row_dict, "uncertain_policy": uncertain_policy,
+                "target_finding": target_finding, "dataset": "chexpert",
+            },
         )
         studies.append(study)
 
