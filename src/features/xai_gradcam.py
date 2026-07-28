@@ -83,6 +83,12 @@ class GradCAM:
         self.model = model.eval()
         self.target_layer = target_layer
         self.activations = None
+        # Infer device from the model itself (moved there by the caller, e.g.
+        # load_torchxrayvision_classifier(device=...)) so __call__ can move
+        # incoming image tensors to match automatically -- otherwise a GPU
+        # model + CPU tensor mismatch throws, or worse, silently runs on CPU
+        # if the model was never actually moved.
+        self.device = next(model.parameters()).device
 
         target_layer.register_forward_hook(self._save_activation)
 
@@ -109,6 +115,7 @@ class GradCAM:
             2D numpy array (H, W) Grad-CAM heatmap, normalized to [0, 1].
         """
         torch = self.torch
+        image_tensor = image_tensor.to(self.device)
         self.model.zero_grad()
         output = self.model(image_tensor)
 
@@ -201,7 +208,7 @@ def extract_xai_features(image_or_tensor, model=None, target_layer=None, class_i
     return derive_spatial_statistics(heatmap)
 
 
-def load_torchxrayvision_classifier(weights: str = "densenet121-res224-all"):
+def load_torchxrayvision_classifier(weights: str = "densenet121-res224-all", device: str = "cpu"):
     """
     Closes Known Gap #1: loads a DenseNet-121 actually pretrained on real
     chest X-ray datasets (CheXpert/NIH/MIMIC/PadChest/...) via
@@ -218,6 +225,14 @@ def load_torchxrayvision_classifier(weights: str = "densenet121-res224-all"):
     adjust `target_layer` to whatever the last convolutional block is
     actually called.
 
+    Args:
+        device: defaults to "cpu" -- this classifier is small (~30M params)
+            and previously always ran on CPU regardless of what device the
+            main VLM used, since nothing here ever called .to(device). Pass
+            "cuda" (e.g. config.VLM_DEVICE) to run it on GPU instead --
+            noticeably faster for large study counts, and the extra VRAM
+            footprint is small next to the main VLM's.
+
     Returns:
         (model, target_layer) -- pass directly into GradCAM(model, target_layer).
     """
@@ -225,6 +240,7 @@ def load_torchxrayvision_classifier(weights: str = "densenet121-res224-all"):
 
     model = xrv.models.DenseNet(weights=weights)
     model.eval()
+    model = model.to(device)
     target_layer = model.features
     return model, target_layer
 
@@ -253,7 +269,7 @@ def preprocess_for_torchxrayvision(image: "np.ndarray") -> "torch.Tensor":
     return tensor
 
 
-def load_xai_backend():
+def load_xai_backend(device: str = "cpu"):
     """
     Load the torchxrayvision classifier + wrap it in a GradCAM instance ONCE,
     for reuse across many studies. Loading torchxrayvision's DenseNet-121 is
@@ -263,13 +279,18 @@ def load_xai_backend():
     independently) reloads the same weights hundreds or thousands of times
     for a large study count, which is both slow and needless.
 
+    Args:
+        device: where to run this classifier -- "cpu" (default, safe
+            everywhere) or "cuda" to noticeably speed up large study counts.
+            Pass config.VLM_DEVICE to match the main VLM's device.
+
     Returns:
         A GradCAM instance, or None if torchxrayvision isn't installed/usable
         (caller should fall back to placeholder XAI stats via
         compute_xai_stats(image, cam=None)).
     """
     try:
-        model, target_layer = load_torchxrayvision_classifier()
+        model, target_layer = load_torchxrayvision_classifier(device=device)
         return GradCAM(model, target_layer)
     except Exception as e:
         print(f"  WARNING: real GradCAM unavailable ({e}); falling back to placeholder XAI stats. "

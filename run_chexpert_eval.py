@@ -186,7 +186,7 @@ def run_ablation_on_chexpert(studies: list, model_family: str, synthetic: bool, 
         from text_embeddings import extract_text_embeddings
         from xai_gradcam import load_xai_backend
 
-        cam = load_xai_backend()  # loaded ONCE, reused for every study below
+        cam = load_xai_backend(device=config.VLM_DEVICE)  # loaded ONCE, reused for every study below
         start_time = time.time()
 
         radiomics_list, xai_list, report_texts, labels = [], [], [], []
@@ -253,7 +253,7 @@ def run_agentic_on_chexpert(
     if not synthetic:
         import time
         from xai_gradcam import load_xai_backend
-        cam = load_xai_backend()  # loaded ONCE, reused for every study below
+        cam = load_xai_backend(device=config.VLM_DEVICE)  # loaded ONCE, reused for every study below
         start_time = time.time()
 
     step0_texts, step1_outputs, step2_outputs, ground_truths = [], [], [], []

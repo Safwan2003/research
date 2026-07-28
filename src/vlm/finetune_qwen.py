@@ -259,7 +259,7 @@ def run_finetune(
         optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr)
 
     from xai_gradcam import load_xai_backend
-    cam = load_xai_backend()
+    cam = load_xai_backend(device=config.VLM_DEVICE)
 
     step = 0
     optimizer.zero_grad()
