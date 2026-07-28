@@ -98,36 +98,16 @@ def build_target_completion(label: int, is_uncertain_finding: bool, target_findi
     }
 
 
-def _load_xai_backend():
-    """Load the torchxrayvision GradCAM backend once, reused across all training examples."""
-    try:
-        from xai_gradcam import GradCAM, load_torchxrayvision_classifier
-        model, target_layer = load_torchxrayvision_classifier()
-        return GradCAM(model, target_layer)
-    except Exception as e:
-        print(f"  WARNING: real GradCAM unavailable ({e}); using placeholder XAI stats for all training examples.")
-        return None
-
-
 def _extract_feature_card_json(image, report_text: str, cam) -> tuple:
     """Returns (feature_card_json, matched_vocab_terms) for one study's image + report."""
-    import numpy as np
     from radiomics import extract_radiomics
     from vocabulary import extract_vocabulary_features
-    from xai_gradcam import derive_spatial_statistics
+    from xai_gradcam import compute_xai_stats
     from feature_card import build_feature_card, feature_card_to_prompt_text
 
     radiomics = extract_radiomics(image)
     vocab = extract_vocabulary_features(report_text)
-
-    if cam is not None:
-        from xai_gradcam import preprocess_for_torchxrayvision
-        tensor = preprocess_for_torchxrayvision(image)
-        heatmap = cam(tensor)
-        xai = derive_spatial_statistics(heatmap)
-    else:
-        rng = np.random.default_rng(0)
-        xai = derive_spatial_statistics(rng.uniform(0.2, 0.8, size=(32, 32)))
+    xai = compute_xai_stats(image, cam)
 
     card = build_feature_card(radiomics, xai, vocab)
     return feature_card_to_prompt_text(card), vocab.get("matched_terms", [])
@@ -278,7 +258,8 @@ def run_finetune(
     else:
         optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr)
 
-    cam = _load_xai_backend()
+    from xai_gradcam import load_xai_backend
+    cam = load_xai_backend()
 
     step = 0
     optimizer.zero_grad()

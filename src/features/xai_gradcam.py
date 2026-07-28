@@ -253,6 +253,49 @@ def preprocess_for_torchxrayvision(image: "np.ndarray") -> "torch.Tensor":
     return tensor
 
 
+def load_xai_backend():
+    """
+    Load the torchxrayvision classifier + wrap it in a GradCAM instance ONCE,
+    for reuse across many studies. Loading torchxrayvision's DenseNet-121 is
+    expensive (disk read / first-run download) -- calling
+    load_torchxrayvision_classifier() + GradCAM(...) fresh inside a per-study
+    loop (as run_chexpert_eval.py and finetune_qwen.py used to do
+    independently) reloads the same weights hundreds or thousands of times
+    for a large study count, which is both slow and needless.
+
+    Returns:
+        A GradCAM instance, or None if torchxrayvision isn't installed/usable
+        (caller should fall back to placeholder XAI stats via
+        compute_xai_stats(image, cam=None)).
+    """
+    try:
+        model, target_layer = load_torchxrayvision_classifier()
+        return GradCAM(model, target_layer)
+    except Exception as e:
+        print(f"  WARNING: real GradCAM unavailable ({e}); falling back to placeholder XAI stats. "
+              f"Install torchxrayvision (`pip install torchxrayvision`) to fix this.")
+        return None
+
+
+def compute_xai_stats(image: "np.ndarray", cam) -> dict:
+    """
+    Run Grad-CAM on `image` using the given cached `cam` (from
+    load_xai_backend()), or fall back to placeholder stats if `cam` is None.
+    Always returns a dict with an explicit "_placeholder" key so callers/logs
+    can tell real Grad-CAM output from the fallback.
+    """
+    if cam is not None:
+        tensor = preprocess_for_torchxrayvision(image)
+        heatmap = cam(tensor)
+        xai = derive_spatial_statistics(heatmap)
+        xai["_placeholder"] = False
+    else:
+        rng = np.random.default_rng(0)
+        xai = derive_spatial_statistics(rng.uniform(0.2, 0.8, size=(32, 32)))
+        xai["_placeholder"] = True
+    return xai
+
+
 if __name__ == "__main__":
     # Self-test for the part that DOESN'T need PyTorch/GPU/pretrained weights:
     # the statistics function. This confirms Eq. (6) is implemented correctly.

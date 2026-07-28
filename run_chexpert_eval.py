@@ -98,13 +98,15 @@ def _get_reasoner(
 def _load_real_studies(n: int, uncertain_policy: str):
     from dataset import load_chexpert_dataset
 
-    csv_path = config.CHEXPERT_CSV_PATH
-    valid_csv = config.CHEXPERT_IMAGES_ROOT / "valid.csv"
-    if valid_csv.exists():
-        csv_path = valid_csv
-
+    # NOTE: this must NOT silently fall back to valid.csv (234 studies) --
+    # an earlier version did exactly that whenever valid.csv happened to
+    # exist on disk (which it always does once run_master.bat has run once),
+    # so --n-ablation/--n-agentic were silently ignored and every real run
+    # used 234 studies regardless of what was actually requested.
+    # config.CHEXPERT_CSV_PATH is the single source of truth -- point it at
+    # valid.csv yourself in config.py if that's genuinely what you want.
     return load_chexpert_dataset(
-        csv_path=str(csv_path),
+        csv_path=str(config.CHEXPERT_CSV_PATH),
         images_root=str(config.CHEXPERT_IMAGES_ROOT),
         limit=n,
         uncertain_policy=uncertain_policy,
@@ -112,34 +114,57 @@ def _load_real_studies(n: int, uncertain_policy: str):
     )
 
 
-def _extract_features_real(study):
-    """Radiomics + XAI + vocabulary for one real study. Returns (radiomics, xai, vocab, image_array)."""
+def _progress(done: int, total: int, start_time, label: str = "", width: int = 30) -> None:
+    """
+    Live progress line for long per-study loops (feature extraction over
+    potentially thousands of studies, VLM inference over the agentic subset).
+    Same elapsed/eta style as scripts/download_chexpert_subset.py so output
+    looks consistent across the pipeline. Overwrites the same terminal line
+    (\r) rather than spamming one line per study.
+    """
+    import time
+    frac = done / total if total else 1.0
+    filled = int(width * frac)
+    bar = "#" * filled + "-" * (width - filled)
+    elapsed = time.time() - start_time
+    rate = done / elapsed if elapsed > 0 else 0
+    eta = (total - done) / rate if rate > 0 else 0
+    end = "\n" if done == total else ""
+    print(
+        f"\r  [{bar}] {done}/{total} ({frac*100:5.1f}%)  "
+        f"elapsed={elapsed:6.1f}s  eta={eta:6.1f}s  {label[:40]:<40}",
+        end=end, flush=True,
+    )
+
+
+def _extract_features_real(study, cam):
+    """
+    Radiomics + XAI + vocabulary for one real study. Returns
+    (radiomics, xai, vocab, image_array), or None if the image couldn't be
+    loaded (missing/corrupt file -- caller should skip this study rather
+    than crash a multi-thousand-study run over one bad file).
+
+    `cam`: a GradCAM instance from xai_gradcam.load_xai_backend(), loaded
+    ONCE by the caller and reused across all studies -- loading the
+    torchxrayvision classifier fresh for every single study (as an earlier
+    version of this function did) turns a few-second one-time cost into
+    thousands of redundant reloads.
+    """
     import numpy as np
     from PIL import Image
     from radiomics import extract_radiomics
     from vocabulary import extract_vocabulary_features
-
-    image = np.array(Image.open(study.frontal_image_path).convert("L"))
-    radiomics = extract_radiomics(image)
-    vocab = extract_vocabulary_features(study.report_text)
+    from xai_gradcam import compute_xai_stats
 
     try:
-        from xai_gradcam import (
-            GradCAM, derive_spatial_statistics,
-            load_torchxrayvision_classifier, preprocess_for_torchxrayvision,
-        )
-        model, target_layer = load_torchxrayvision_classifier()
-        cam = GradCAM(model, target_layer)
-        tensor = preprocess_for_torchxrayvision(image)
-        heatmap = cam(tensor)
-        xai = derive_spatial_statistics(heatmap)
-        xai["_placeholder"] = False
-    except Exception as e:
-        print(f"  WARNING: real GradCAM unavailable ({e}); using placeholder XAI stats. "
-              f"Install torchxrayvision (`pip install torchxrayvision`) to fix this.")
-        rng = np.random.default_rng(0)
-        xai = derive_spatial_statistics(rng.uniform(0.2, 0.8, size=(32, 32)))
-        xai["_placeholder"] = True
+        image = np.array(Image.open(study.frontal_image_path).convert("L"))
+    except (FileNotFoundError, OSError) as e:
+        print(f"\n  WARNING: skipping study {study.study_id!r} ({study.frontal_image_path}): {e}")
+        return None
+
+    radiomics = extract_radiomics(image)
+    vocab = extract_vocabulary_features(study.report_text)
+    xai = compute_xai_stats(image, cam)
 
     return radiomics, xai, vocab, image
 
@@ -157,15 +182,29 @@ def run_ablation_on_chexpert(studies: list, model_family: str, synthetic: bool, 
         xai_features = rng.normal(0, 1, size=(n, 4)) + labels[:, None] * 0.2
         text_embedding_source = "synthetic"
     else:
+        import time
         from text_embeddings import extract_text_embeddings
+        from xai_gradcam import load_xai_backend
+
+        cam = load_xai_backend()  # loaded ONCE, reused for every study below
+        start_time = time.time()
 
         radiomics_list, xai_list, report_texts, labels = [], [], [], []
-        for study in studies:
-            radiomics, xai, _vocab, _image = _extract_features_real(study)
+        n_skipped = 0
+        for i, study in enumerate(studies, 1):
+            extracted = _extract_features_real(study, cam)
+            if extracted is None:
+                n_skipped += 1
+                continue
+            radiomics, xai, _vocab, _image = extracted
             radiomics_list.append(list({k: v for k, v in radiomics.items() if isinstance(v, (int, float))}.values()))
             xai_list.append([xai["xai_mean"], xai["xai_max"], xai["xai_entropy"], xai["xai_top10pct_mass"]])
             report_texts.append(study.report_text)
             labels.append(study.label)
+            _progress(i, len(studies), start_time, label=f"study {study.study_id}")
+
+        if n_skipped:
+            print(f"  WARNING: skipped {n_skipped}/{len(studies)} studies with missing/corrupt images.")
 
         radiomics_features = np.array(radiomics_list)
         xai_features = np.array(xai_list)
@@ -179,8 +218,8 @@ def run_ablation_on_chexpert(studies: list, model_family: str, synthetic: bool, 
     run_record = new_run_record(
         mode="ablation",
         config_snapshot={
-            "seed": config.RANDOM_SEED, "n_studies": len(studies), "dataset": "chexpert",
-            "model_family": model_family, "text_embedding_source": text_embedding_source,
+            "seed": config.RANDOM_SEED, "n_studies": len(labels), "n_studies_requested": len(studies),
+            "dataset": "chexpert", "model_family": model_family, "text_embedding_source": text_embedding_source,
             "synthetic": synthetic,
             # Ablation is pure sklearn over radiomics/XAI/text-embedding features and
             # never calls the VLM at all, so it's identical regardless of which
@@ -210,14 +249,26 @@ def run_agentic_on_chexpert(
         finetune_regime=finetune_regime, model_path=model_path,
     )
 
-    step0_texts, step1_outputs, step2_outputs, ground_truths = [], [], [], []
+    cam = None
+    if not synthetic:
+        import time
+        from xai_gradcam import load_xai_backend
+        cam = load_xai_backend()  # loaded ONCE, reused for every study below
+        start_time = time.time()
 
-    for study in studies:
+    step0_texts, step1_outputs, step2_outputs, ground_truths = [], [], [], []
+    n_skipped = 0
+
+    for i, study in enumerate(studies, 1):
         if synthetic:
             radiomics, xai, vocab, image_path = {"mean": 0.0}, {"xai_mean": 0.0, "xai_max": 0.0, "xai_entropy": 0.0, "xai_top10pct_mass": 0.0}, {"matched_terms": [], "num_matched_terms": 0}, "synthetic.png"
             report_text = study["report_text"]
         else:
-            radiomics, xai, vocab, _image = _extract_features_real(study)
+            extracted = _extract_features_real(study, cam)
+            if extracted is None:
+                n_skipped += 1
+                continue
+            radiomics, xai, vocab, _image = extracted
             image_path = study.frontal_image_path
             report_text = study.report_text
 
@@ -231,6 +282,12 @@ def run_agentic_on_chexpert(
         step1_outputs.append(result["step1"])
         step2_outputs.append(result["step2"])
         ground_truths.append(report_text)
+
+        if not synthetic:
+            _progress(i, len(studies), start_time, label=f"study {study.study_id}")
+
+    if n_skipped:
+        print(f"  WARNING: skipped {n_skipped}/{len(studies)} studies with missing/corrupt images.")
 
     def _to_text(structured_or_str):
         if isinstance(structured_or_str, str):
@@ -275,8 +332,8 @@ def run_agentic_on_chexpert(
         responsible_ai_results = compute_responsible_ai_indicators(valid_step2)
 
     base_config = {
-        "seed": config.RANDOM_SEED, "n_studies": len(studies), "dataset": "chexpert",
-        "model_family": model_family, "synthetic": synthetic,
+        "seed": config.RANDOM_SEED, "n_studies": len(ground_truths), "n_studies_requested": len(studies),
+        "dataset": "chexpert", "model_family": model_family, "synthetic": synthetic,
         "finetune_regime": finetune_regime, "adapter_path": adapter_path, "model_path": model_path,
         "target_finding": config.CHEXPERT_TARGET_FINDING,
     }
