@@ -139,6 +139,44 @@ def _build_training_example(processor, image_path: str, prompt_text: str, target
     return {k: (v.to(device) if hasattr(v, "to") else v) for k, v in full_inputs.items()}
 
 
+def _build_example_for_study(study, processor, cam, device, config, question=QUESTION):
+    """Full per-study pipeline: extract features -> build prompt+target -> tokenize."""
+    import numpy as np
+    from PIL import Image
+    from prompts import build_context_aligned_prompt
+
+    image = np.array(Image.open(study.frontal_image_path).convert("L"))
+    card_json, matched_terms = _extract_feature_card_json(image, study.report_text, cam)
+    prompt_text = build_context_aligned_prompt(question, study.report_text, card_json)
+
+    raw_val = study.metadata.get("raw_row", {}).get(config.CHEXPERT_TARGET_FINDING)
+    is_uncertain = raw_val in (-1, -1.0)
+    target = build_target_completion(study.label, is_uncertain, config.CHEXPERT_TARGET_FINDING, matched_terms)
+
+    return _build_training_example(processor, study.frontal_image_path, prompt_text, target, device)
+
+
+def _evaluate_val_loss(model, val_examples: list) -> float:
+    """Average loss over a held-out set, without touching gradients or training mode."""
+    import torch
+
+    model.eval()
+    total, n = 0.0, 0
+    with torch.no_grad():
+        for example in val_examples:
+            total += model(**example).loss.item()
+            n += 1
+    model.train()
+    return total / max(n, 1)
+
+
+def _save_checkpoint(model, processor, output_dir: str, regime: str):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(output_dir)
+    if regime == "full":
+        processor.save_pretrained(output_dir)
+
+
 def _build_lora_model(model, r: int, alpha: int, dropout: float):
     from peft import LoraConfig, get_peft_model
 
@@ -163,6 +201,9 @@ def run_finetune(
     lora_alpha: int = 32,
     lora_dropout: float = 0.05,
     log_every: int = 20,
+    val_frac: float = 0.1,
+    patience: int = 3,
+    eval_every: int = None,
 ):
     """
     Fine-tune Qwen2-VL-2B on `n_studies` CheXpert studies under one of three
@@ -188,6 +229,16 @@ def run_finetune(
     `output_dir` gets a complete standalone model+processor checkpoint (a
     few GB) -- reload via QwenVLReasoner(model_name=output_dir) (no
     adapter_path).
+
+    Early stopping: `val_frac` of the loaded studies (10% by default) is held
+    out and never trained on. Every `eval_every` optimizer steps (auto-sized
+    to ~5 checks per epoch if not given), validation loss is measured on that
+    held-out set; `output_dir` is overwritten with the checkpoint ONLY when
+    validation loss improves, and training stops early if it fails to improve
+    for `patience` consecutive checks. Without this, a single epoch over a
+    deterministic, templated training target (build_target_completion) risks
+    the model memorizing surface phrasing rather than learning anything that
+    generalizes -- there was previously no validation signal here at all.
     """
     import numpy as np
     import torch
@@ -214,6 +265,13 @@ def run_finetune(
         target_finding=config.CHEXPERT_TARGET_FINDING,
     )
     print(f"Loaded {len(studies)} studies (target_finding={config.CHEXPERT_TARGET_FINDING!r}).")
+
+    rng = np.random.default_rng(config.RANDOM_SEED)
+    shuffled = studies.copy()
+    rng.shuffle(shuffled)
+    n_val = max(1, int(len(shuffled) * val_frac)) if val_frac > 0 else 0
+    val_studies, train_studies = shuffled[:n_val], shuffled[n_val:]
+    print(f"Train/val split: {len(train_studies)} train, {len(val_studies)} held out for early stopping.")
 
     if regime == "qlora":
         from transformers import BitsAndBytesConfig
@@ -276,19 +334,26 @@ def run_finetune(
     from xai_gradcam import load_xai_backend
     cam = load_xai_backend(device=config.VLM_DEVICE)
 
+    total_train_steps = max(1, len(train_studies) * epochs)
+    if eval_every is None:
+        eval_every = max(20, total_train_steps // 5)  # ~5 validation checks per epoch
+
+    val_examples = None
+    if val_studies:
+        print(f"Precomputing {len(val_studies)} held-out validation examples...")
+        val_examples = [_build_example_for_study(s, processor, cam, device, config) for s in val_studies]
+
+    best_val_loss = float("inf")
+    evals_without_improvement = 0
+    stop_early = False
+
     step = 0
     optimizer.zero_grad()
     for epoch in range(epochs):
-        for study in studies:
-            image = np.array(Image.open(study.frontal_image_path).convert("L"))
-            card_json, matched_terms = _extract_feature_card_json(image, study.report_text, cam)
-            prompt_text = build_context_aligned_prompt(QUESTION, study.report_text, card_json)
-
-            raw_val = study.metadata.get("raw_row", {}).get(config.CHEXPERT_TARGET_FINDING)
-            is_uncertain = raw_val in (-1, -1.0)
-            target = build_target_completion(study.label, is_uncertain, config.CHEXPERT_TARGET_FINDING, matched_terms)
-
-            example = _build_training_example(processor, study.frontal_image_path, prompt_text, target, device)
+        if stop_early:
+            break
+        for study in train_studies:
+            example = _build_example_for_study(study, processor, cam, device, config)
 
             outputs = model(**example)
             loss = outputs.loss / grad_accum_steps
@@ -301,20 +366,41 @@ def run_finetune(
                 optimizer.zero_grad()
 
             if step % log_every == 0:
-                print(f"  epoch {epoch + 1}/{epochs} step {step}/{len(studies) * epochs}: loss={outputs.loss.item():.4f}")
+                print(f"  epoch {epoch + 1}/{epochs} step {step}/{total_train_steps}: loss={outputs.loss.item():.4f}")
+
+            if val_examples and step % eval_every == 0:
+                val_loss = _evaluate_val_loss(model, val_examples)
+                improved = val_loss < best_val_loss - 1e-4
+                print(f"  [val] step {step}: val_loss={val_loss:.4f}"
+                      f" (best={best_val_loss:.4f})" + (" -- new best, saving" if improved else ""))
+                if improved:
+                    best_val_loss = val_loss
+                    evals_without_improvement = 0
+                    _save_checkpoint(model, processor, output_dir, regime)
+                else:
+                    evals_without_improvement += 1
+                    if evals_without_improvement >= patience:
+                        print(f"  Early stopping: no val_loss improvement for {patience} checks "
+                              f"(best={best_val_loss:.4f}). Stopping at step {step}.")
+                        stop_early = True
+                        break
 
     if step % grad_accum_steps != 0:
         optimizer.step()
         optimizer.zero_grad()
 
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(output_dir)
+    if val_examples:
+        # Guarantee at least one checkpoint even if training finished (or stopped)
+        # between eval_every checks without ever beating the initial inf best.
+        if best_val_loss == float("inf"):
+            final_val_loss = _evaluate_val_loss(model, val_examples)
+            print(f"  [val] final: val_loss={final_val_loss:.4f} (no earlier improvement recorded, saving)")
+            _save_checkpoint(model, processor, output_dir, regime)
+        print(f"Best held-out validation loss: {best_val_loss if best_val_loss != float('inf') else final_val_loss:.4f}")
+    else:
+        _save_checkpoint(model, processor, output_dir, regime)
+
     if regime == "full":
-        # Unlike the adapter regimes, "full" has no separate frozen base to
-        # reload alongside it -- save the processor too so output_dir is a
-        # complete, standalone checkpoint QwenVLReasoner(model_name=output_dir)
-        # can load directly.
-        processor.save_pretrained(output_dir)
         print(f"Saved full fine-tuned model + processor to {output_dir}")
     else:
         print(f"Saved {regime} adapter to {output_dir}")
@@ -362,9 +448,16 @@ if __name__ == "__main__":
         parser.add_argument("--grad-accum-steps", type=int, default=8)
         parser.add_argument("--lora-r", type=int, default=16)
         parser.add_argument("--output-dir", default=None)
+        parser.add_argument("--val-frac", type=float, default=0.1,
+                             help="Fraction of --n-studies held out for early-stopping validation (0 to disable).")
+        parser.add_argument("--patience", type=int, default=3,
+                             help="Stop after this many validation checks with no improvement.")
+        parser.add_argument("--eval-every", type=int, default=None,
+                             help="Validate every N optimizer steps. Default: auto (~5 checks/epoch).")
         args = parser.parse_args()
 
         run_finetune(
             regime=args.regime, n_studies=args.n_studies, epochs=args.epochs, lr=args.lr,
             grad_accum_steps=args.grad_accum_steps, lora_r=args.lora_r, output_dir=args.output_dir,
+            val_frac=args.val_frac, patience=args.patience, eval_every=args.eval_every,
         )
