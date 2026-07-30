@@ -317,6 +317,10 @@ def run_finetune(
 
     last_dir = f"{output_dir.rstrip('/')}_last"
     log_path = f"{last_dir}/train_log.jsonl"
+    # train_log.jsonl gets its first write at step log_every (20 by default), long before
+    # _save_resume_state's first call at step eval_every (~hundreds) -- create the directory
+    # now so that first write doesn't crash looking for a parent dir that doesn't exist yet.
+    Path(last_dir).mkdir(parents=True, exist_ok=True)
     resume_state = _load_resume_state(last_dir) if resume else None
     if resume:
         if resume_state:
