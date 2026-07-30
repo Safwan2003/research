@@ -184,13 +184,13 @@ def _append_jsonl(log_path: str, record: dict):
         f.flush()
 
 
-def _save_resume_state(last_dir: str, model, processor, regime: str, optimizer,
+def _save_resume_state(last_dir: str, model, processor, regime: str, optimizer, scheduler,
                         step: int, best_val_loss: float, evals_without_improvement: int):
     """
-    Unconditional crash-safety checkpoint: model weights + optimizer state +
-    training counters, saved every eval_every steps regardless of whether
-    validation improved (unlike _save_checkpoint's output_dir, which is the
-    best-so-far model and only updates on improvement). Reload via
+    Unconditional crash-safety checkpoint: model weights + optimizer/scheduler
+    state + training counters, saved every eval_every steps regardless of
+    whether validation improved (unlike _save_checkpoint's output_dir, which
+    is the best-so-far model and only updates on improvement). Reload via
     run_finetune(..., resume=True).
     """
     import torch
@@ -202,6 +202,7 @@ def _save_resume_state(last_dir: str, model, processor, regime: str, optimizer,
         "step": step, "best_val_loss": best_val_loss,
         "evals_without_improvement": evals_without_improvement,
         "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
     }, f"{last_dir}/training_state.pt")
 
 
@@ -242,6 +243,7 @@ def run_finetune(
     patience: int = 3,
     eval_every: int = None,
     resume: bool = False,
+    warmup_ratio: float = 0.1,
 ):
     """
     Fine-tune Qwen2-VL-2B on `n_studies` CheXpert studies under one of three
@@ -288,6 +290,14 @@ def run_finetune(
     appended, one JSON object per line and flushed immediately, to
     output_dir + "_last/train_log.jsonl" -- readable even mid-run, and
     survives a crash that loses the terminal's scrollback.
+
+    Learning rate: AdamW already adapts per-parameter step sizes internally
+    (that's what "Adam" means), but `lr` itself was previously flat for the
+    whole run -- no warmup, no decay. `warmup_ratio` (10% of optimizer steps
+    by default) now ramps lr linearly up from 0, then decays it linearly back
+    to 0 over the rest of training. A flat lr that's reasonable early on can
+    cause unstable jumps once the model's mostly converged, which is a
+    plausible explanation for occasional loss spikes seen mid-training.
     """
     import numpy as np
     import torch
@@ -406,10 +416,26 @@ def run_finetune(
     if resume_state:
         optimizer.load_state_dict(resume_state["optimizer_state_dict"])
 
+    total_train_steps = max(1, len(train_studies) * epochs)
+    total_optimizer_steps = max(1, -(-total_train_steps // grad_accum_steps))  # ceil division
+
+    # Linear warmup (first warmup_ratio of optimizer steps) then linear decay to 0. There was
+    # previously no schedule at all -- a flat lr for the whole run is a plausible contributor to
+    # the occasional loss spikes seen mid-training (0.03-0.09 popping up amid a sea of ~0.0005):
+    # a fixed lr that's reasonable early on can be too aggressive for fine adjustments once the
+    # model's mostly converged.
+    from transformers import get_linear_schedule_with_warmup
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=max(1, int(total_optimizer_steps * warmup_ratio)),
+        num_training_steps=total_optimizer_steps,
+    )
+    if resume_state and "scheduler_state_dict" in resume_state:
+        scheduler.load_state_dict(resume_state["scheduler_state_dict"])
+
     from xai_gradcam import load_xai_backend
     cam = load_xai_backend(device=config.VLM_DEVICE)
 
-    total_train_steps = max(1, len(train_studies) * epochs)
     if eval_every is None:
         eval_every = max(20, total_train_steps // 5)  # ~5 validation checks per epoch
 
@@ -446,11 +472,14 @@ def run_finetune(
         if step % grad_accum_steps == 0:
             torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], 1.0)
             optimizer.step()
+            scheduler.step()
             optimizer.zero_grad()
 
         if step % log_every == 0:
-            print(f"  epoch {epoch + 1}/{epochs} step {step}/{total_train_steps}: loss={outputs.loss.item():.4f}")
-            _append_jsonl(log_path, {"type": "train", "step": step, "loss": outputs.loss.item()})
+            current_lr = scheduler.get_last_lr()[0]
+            print(f"  epoch {epoch + 1}/{epochs} step {step}/{total_train_steps}: "
+                  f"loss={outputs.loss.item():.4f} lr={current_lr:.2e}")
+            _append_jsonl(log_path, {"type": "train", "step": step, "loss": outputs.loss.item(), "lr": current_lr})
 
         if step % eval_every == 0:
             if val_examples:
@@ -469,7 +498,7 @@ def run_finetune(
             # Unconditional crash-safety checkpoint -- saved every eval_every steps
             # regardless of whether validation improved (or whether validation is
             # even enabled), so an interrupted run has somewhere recent to resume from.
-            _save_resume_state(last_dir, model, processor, regime, optimizer,
+            _save_resume_state(last_dir, model, processor, regime, optimizer, scheduler,
                                 step, best_val_loss, evals_without_improvement)
 
             if val_examples and evals_without_improvement >= patience:
@@ -550,11 +579,14 @@ if __name__ == "__main__":
                              help="Continue from <output-dir>_last/training_state.pt if it exists "
                                   "(model weights + optimizer state + step/best-val counters), "
                                   "instead of starting over. No-op with a warning if nothing is there.")
+        parser.add_argument("--warmup-ratio", type=float, default=0.1,
+                             help="Fraction of optimizer steps spent ramping lr up from 0 before "
+                                  "linearly decaying it back to 0 over the rest of training.")
         args = parser.parse_args()
 
         run_finetune(
             regime=args.regime, n_studies=args.n_studies, epochs=args.epochs, lr=args.lr,
             grad_accum_steps=args.grad_accum_steps, lora_r=args.lora_r, output_dir=args.output_dir,
             val_frac=args.val_frac, patience=args.patience, eval_every=args.eval_every,
-            resume=args.resume,
+            resume=args.resume, warmup_ratio=args.warmup_ratio,
         )
