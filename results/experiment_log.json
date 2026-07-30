@@ -709,6 +709,135 @@
         }
       },
       "notes": ""
+    },
+    {
+      "run_id": "b3b5aab1-cfa2-4d81-b8a9-ea8b7d8c9769",
+      "timestamp_utc": "2026-07-28T10:03:21.574999+00:00",
+      "git_commit": "18ee1ba660727d7ecf95c6b4c15204827815aca7",
+      "host": "FBS-RESEARCHLAB-WS73",
+      "mode": "ablation",
+      "config_snapshot": {
+        "seed": 42,
+        "n_studies": 5000,
+        "n_studies_requested": 5000,
+        "dataset": "chexpert",
+        "model_family": "qwen2-vl",
+        "text_embedding_source": "sentence-transformers/all-MiniLM-L6-v2",
+        "synthetic": false,
+        "finetune_regime": "frozen",
+        "target_finding": "Cardiomegaly"
+      },
+      "results": {
+        "ablation": {
+          "Radiomics only": 0.5445386948325384,
+          "XAI only": 0.515518027965695,
+          "Text only": 0.6758120321571527,
+          "Radiomics + Text": 0.6744733908467131,
+          "XAI + Text": 0.6789202262518914,
+          "Radiomics + XAI + Text": 0.6760789227653341
+        }
+      },
+      "notes": ""
+    },
+    {
+      "run_id": "e01958ef-f607-438e-a674-facef659e02c",
+      "timestamp_utc": "2026-07-28T10:24:24.969048+00:00",
+      "git_commit": "18ee1ba660727d7ecf95c6b4c15204827815aca7",
+      "host": "FBS-RESEARCHLAB-WS73",
+      "mode": "hallucination",
+      "config_snapshot": {
+        "seed": 42,
+        "n_studies": 50,
+        "n_studies_requested": 50,
+        "dataset": "chexpert",
+        "model_family": "qwen2-vl",
+        "synthetic": false,
+        "finetune_regime": "frozen",
+        "adapter_path": null,
+        "model_path": null,
+        "target_finding": "Cardiomegaly"
+      },
+      "results": {
+        "hallucination": {
+          "Image + Text (baseline Y0)": 0.2,
+          "Image + Text + Radiomics + XAI (Y2)": 0.36
+        }
+      },
+      "notes": ""
+    },
+    {
+      "run_id": "637941db-8765-4222-b6ff-abaf8258ec63",
+      "timestamp_utc": "2026-07-28T10:24:24.995205+00:00",
+      "git_commit": "18ee1ba660727d7ecf95c6b4c15204827815aca7",
+      "host": "FBS-RESEARCHLAB-WS73",
+      "mode": "agentic_reasoning",
+      "config_snapshot": {
+        "seed": 42,
+        "n_studies": 50,
+        "n_studies_requested": 50,
+        "dataset": "chexpert",
+        "model_family": "qwen2-vl",
+        "synthetic": false,
+        "finetune_regime": "frozen",
+        "adapter_path": null,
+        "model_path": null,
+        "target_finding": "Cardiomegaly"
+      },
+      "results": {
+        "agentic_reasoning": {
+          "step0_vs_step1": {
+            "step1": {
+              "uncertainty_mean": 0.3782608695652174,
+              "uncertainty_std": 0.29629087021566647,
+              "evidence_length_mean": 14.08695652173913,
+              "evidence_length_std": 10.154943296047287,
+              "presence_limitations": 1.0,
+              "presence_safety_notes": 1.0
+            }
+          },
+          "step2": {
+            "uncertainty_mean": 0.096,
+            "uncertainty_std": 0.20876781361119823,
+            "evidence_length_mean": 8.46,
+            "evidence_length_std": 4.907993480028269,
+            "presence_limitations": 1.0,
+            "presence_safety_notes": 1.0
+          }
+        }
+      },
+      "notes": ""
+    },
+    {
+      "run_id": "4d8de9c8-f715-4262-98bf-d705c2548233",
+      "timestamp_utc": "2026-07-28T10:24:25.022263+00:00",
+      "git_commit": "18ee1ba660727d7ecf95c6b4c15204827815aca7",
+      "host": "FBS-RESEARCHLAB-WS73",
+      "mode": "text_metrics",
+      "config_snapshot": {
+        "seed": 42,
+        "n_studies": 50,
+        "n_studies_requested": 50,
+        "dataset": "chexpert",
+        "model_family": "qwen2-vl",
+        "synthetic": false,
+        "finetune_regime": "frozen",
+        "adapter_path": null,
+        "model_path": null,
+        "target_finding": "Cardiomegaly"
+      },
+      "results": {
+        "text_metrics": {
+          "rouge1": 0.4687274248865871,
+          "rouge2": 0.3707806704345083,
+          "rougeL": 0.4651295412887035,
+          "sacrebleu": 24.81394259376147,
+          "bertscore_f1": 0.8539140224456787,
+          "phi_pct": 0.0,
+          "unsafe_pct": 0.0,
+          "unc_rate": 0.34
+        }
+      },
+      "notes": ""
     }
   ]
 }

@@ -95,7 +95,7 @@ def _get_reasoner(
     raise ValueError(f"Unknown model_family: {model_family}")
 
 
-def _load_real_studies(n: int, uncertain_policy: str):
+def _load_real_studies(n: int, uncertain_policy: str, offset: int = 0):
     from dataset import load_chexpert_dataset
 
     # NOTE: this must NOT silently fall back to valid.csv (234 studies) --
@@ -111,6 +111,7 @@ def _load_real_studies(n: int, uncertain_policy: str):
         limit=n,
         uncertain_policy=uncertain_policy,
         target_finding=config.CHEXPERT_TARGET_FINDING,
+        offset=offset,
     )
 
 
@@ -383,6 +384,15 @@ def main():
         help="Label for which regime is being evaluated -- logged into config_snapshot so "
              "scripts/compile_finetune_comparison.py can group runs.",
     )
+    parser.add_argument(
+        "--agentic-offset", type=int, default=0,
+        help="Row offset (into config.CHEXPERT_CSV_PATH) for the agentic/hallucination/text-metrics "
+             "eval set. src/vlm/finetune_qwen.py always trains on rows starting at 0, so evaluating a "
+             "LoRA/QLoRA/full-fine-tuned model with the default offset=0 would score it on studies it "
+             "was also trained on, inflating every downstream quality metric. Set this to at least "
+             "N_FINETUNE_STUDIES (plus a safety margin) when --finetune-regime is lora/qlora/full. "
+             "Ablation is unaffected (never calls the VLM) and always uses offset 0.",
+    )
     args = parser.parse_args()
 
     if not args.synthetic and not args.model:
@@ -398,22 +408,35 @@ def main():
 
     model_family = args.model or "qwen2-vl"
 
+    if args.finetune_regime in ("lora", "qlora", "full") and args.agentic_offset == 0 and not args.synthetic:
+        print(
+            "  WARNING: --finetune-regime is a fine-tuned regime but --agentic-offset is 0 -- the "
+            "agentic/hallucination/text-metrics eval will score studies that may also have been used "
+            "for training, inflating these metrics. Pass --agentic-offset (see --help) unless this is "
+            "intentional (e.g., checking training-set performance).\n"
+        )
+
     print(f"=== CheXpert evaluation: model={model_family}, regime={args.finetune_regime}, synthetic={args.synthetic} ===\n")
 
     if args.synthetic:
         import numpy as np
         rng = np.random.default_rng(config.RANDOM_SEED)
-        n = max(args.n_ablation, args.n_agentic)
+        n = max(args.n_ablation, args.n_agentic + args.agentic_offset)
         studies = [
             {"study_id": str(i), "label": int(rng.integers(0, 2)), "report_text": "No Finding." if i % 2 == 0 else "Cardiomegaly present."}
             for i in range(n)
         ]
         ablation_studies = studies[: args.n_ablation]
-        agentic_studies = studies[: args.n_agentic]
+        agentic_studies = studies[args.agentic_offset: args.agentic_offset + args.n_agentic]
     else:
-        studies = _load_real_studies(n=max(args.n_ablation, args.n_agentic), uncertain_policy=args.uncertain_policy)
-        ablation_studies = studies[: args.n_ablation]
-        agentic_studies = studies[: args.n_agentic]
+        # Ablation never touches the VLM (pure sklearn over extracted features), so there's no
+        # train/test leakage concern for it -- it always reads from row 0 regardless of
+        # --agentic-offset. Only the agentic/hallucination/text-metrics eval (which actually
+        # generates from the model) needs to be held out from whatever finetune_qwen.py trained on.
+        ablation_studies = _load_real_studies(n=args.n_ablation, uncertain_policy=args.uncertain_policy)
+        agentic_studies = _load_real_studies(
+            n=args.n_agentic, uncertain_policy=args.uncertain_policy, offset=args.agentic_offset,
+        )
 
     print(f"\n--- Ablation study ({len(ablation_studies)} studies) ---")
     run_ablation_on_chexpert(ablation_studies, model_family, args.synthetic)

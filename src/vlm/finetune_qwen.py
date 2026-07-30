@@ -177,6 +177,43 @@ def _save_checkpoint(model, processor, output_dir: str, regime: str):
         processor.save_pretrained(output_dir)
 
 
+def _append_jsonl(log_path: str, record: dict):
+    """Append one record and flush immediately -- a crash right after this call must not lose it."""
+    with open(log_path, "a") as f:
+        f.write(json.dumps(record) + "\n")
+        f.flush()
+
+
+def _save_resume_state(last_dir: str, model, processor, regime: str, optimizer,
+                        step: int, best_val_loss: float, evals_without_improvement: int):
+    """
+    Unconditional crash-safety checkpoint: model weights + optimizer state +
+    training counters, saved every eval_every steps regardless of whether
+    validation improved (unlike _save_checkpoint's output_dir, which is the
+    best-so-far model and only updates on improvement). Reload via
+    run_finetune(..., resume=True).
+    """
+    import torch
+    Path(last_dir).mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(last_dir)
+    if regime == "full":
+        processor.save_pretrained(last_dir)
+    torch.save({
+        "step": step, "best_val_loss": best_val_loss,
+        "evals_without_improvement": evals_without_improvement,
+        "optimizer_state_dict": optimizer.state_dict(),
+    }, f"{last_dir}/training_state.pt")
+
+
+def _load_resume_state(last_dir: str):
+    """Returns the saved dict from _save_resume_state(), or None if there's nothing to resume from."""
+    import torch
+    state_path = Path(last_dir) / "training_state.pt"
+    if not state_path.exists():
+        return None
+    return torch.load(state_path, map_location="cpu")
+
+
 def _build_lora_model(model, r: int, alpha: int, dropout: float):
     from peft import LoraConfig, get_peft_model
 
@@ -204,6 +241,7 @@ def run_finetune(
     val_frac: float = 0.1,
     patience: int = 3,
     eval_every: int = None,
+    resume: bool = False,
 ):
     """
     Fine-tune Qwen2-VL-2B on `n_studies` CheXpert studies under one of three
@@ -239,6 +277,17 @@ def run_finetune(
     deterministic, templated training target (build_target_completion) risks
     the model memorizing surface phrasing rather than learning anything that
     generalizes -- there was previously no validation signal here at all.
+
+    Crash safety / resume: at that same eval_every cadence, a SEPARATE "last"
+    checkpoint (output_dir + "_last") is saved unconditionally -- model
+    weights, optimizer state, and step/best-val counters -- regardless of
+    whether validation improved. This is what protects an unattended run
+    against a crash, GPU driver hang, or power loss: pass resume=True (or
+    --resume on the CLI) to continue from there instead of starting over.
+    Every step's train loss and every validation's val loss are also
+    appended, one JSON object per line and flushed immediately, to
+    output_dir + "_last/train_log.jsonl" -- readable even mid-run, and
+    survives a crash that loses the terminal's scrollback.
     """
     import numpy as np
     import torch
@@ -255,6 +304,16 @@ def run_finetune(
     model_name = model_name or config.VLM_MODEL_NAME
     output_dir = output_dir or str(_PROJECT_ROOT / "models" / f"{regime}_chexpert_2b")
     device = config.VLM_DEVICE
+
+    last_dir = f"{output_dir.rstrip('/')}_last"
+    log_path = f"{last_dir}/train_log.jsonl"
+    resume_state = _load_resume_state(last_dir) if resume else None
+    if resume:
+        if resume_state:
+            print(f"Resuming from {last_dir} at step {resume_state['step']} "
+                  f"(best_val_loss so far: {resume_state['best_val_loss']:.4f}).")
+        else:
+            print(f"--resume was set but no checkpoint found at {last_dir} -- starting fresh.")
 
     print(f"=== Fine-tuning {model_name} ({regime.upper()}) on {n_studies} CheXpert studies ===")
 
@@ -286,8 +345,12 @@ def run_finetune(
         )
         model = prepare_model_for_kbit_training(model)
     else:
+        # "full" resuming reloads its own previously-saved complete checkpoint instead of
+        # the original base weights. "lora" always starts from the original frozen base --
+        # only its small adapter (reloaded below) needs to resume from last_dir.
+        base_source = last_dir if (regime == "full" and resume_state) else model_name
         model = Qwen2VLForConditionalGeneration.from_pretrained(
-            model_name, torch_dtype=torch.float16, device_map=device
+            base_source, torch_dtype=torch.float16, device_map=device
         )
 
     model.config.use_cache = False  # required alongside gradient checkpointing, all regimes
@@ -310,7 +373,16 @@ def run_finetune(
         if regime == "lora":
             model.gradient_checkpointing_enable()
             model.enable_input_require_grads()
-        model = _build_lora_model(model, r=lora_r, alpha=lora_alpha, dropout=lora_dropout)
+        if resume_state:
+            from peft import PeftModel
+            # is_trainable=True is required here -- PeftModel.from_pretrained defaults to
+            # eval-only loading (adapter params come back with requires_grad=False), which
+            # is right for QwenVLReasoner's inference use but would silently freeze the
+            # adapter here.
+            model = PeftModel.from_pretrained(model, last_dir, is_trainable=True)
+            print(f"Resumed {regime} adapter weights from {last_dir}.")
+        else:
+            model = _build_lora_model(model, r=lora_r, alpha=lora_alpha, dropout=lora_dropout)
 
     model.train()
 
@@ -331,6 +403,9 @@ def run_finetune(
     else:
         optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr)
 
+    if resume_state:
+        optimizer.load_state_dict(resume_state["optimizer_state_dict"])
+
     from xai_gradcam import load_xai_backend
     cam = load_xai_backend(device=config.VLM_DEVICE)
 
@@ -343,47 +418,64 @@ def run_finetune(
         print(f"Precomputing {len(val_studies)} held-out validation examples...")
         val_examples = [_build_example_for_study(s, processor, cam, device, config) for s in val_studies]
 
-    best_val_loss = float("inf")
-    evals_without_improvement = 0
-    stop_early = False
+    best_val_loss = resume_state["best_val_loss"] if resume_state else float("inf")
+    evals_without_improvement = resume_state["evals_without_improvement"] if resume_state else 0
+    start_step = resume_state["step"] if resume_state else 0
+
+    # Flattened (epoch, study) work list -- lets resume skip exactly `start_step`
+    # already-completed items regardless of where they fall relative to an epoch
+    # boundary. train_studies' order is reproducible (seeded shuffle from
+    # config.RANDOM_SEED), so re-deriving this list on a resumed run reconstructs
+    # the identical remaining work without needing to persist it separately.
+    flat_work = [(epoch, study) for epoch in range(epochs) for study in train_studies]
+    if start_step >= len(flat_work):
+        print(f"Resume step {start_step} >= total planned steps {len(flat_work)} -- nothing left to train.")
 
     step = 0
     optimizer.zero_grad()
-    for epoch in range(epochs):
-        if stop_early:
-            break
-        for study in train_studies:
-            example = _build_example_for_study(study, processor, cam, device, config)
+    for step_idx, (epoch, study) in enumerate(flat_work, start=1):
+        if step_idx <= start_step:
+            continue
+        example = _build_example_for_study(study, processor, cam, device, config)
 
-            outputs = model(**example)
-            loss = outputs.loss / grad_accum_steps
-            loss.backward()
-            step += 1
+        outputs = model(**example)
+        loss = outputs.loss / grad_accum_steps
+        loss.backward()
+        step = step_idx
 
-            if step % grad_accum_steps == 0:
-                torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], 1.0)
-                optimizer.step()
-                optimizer.zero_grad()
+        if step % grad_accum_steps == 0:
+            torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], 1.0)
+            optimizer.step()
+            optimizer.zero_grad()
 
-            if step % log_every == 0:
-                print(f"  epoch {epoch + 1}/{epochs} step {step}/{total_train_steps}: loss={outputs.loss.item():.4f}")
+        if step % log_every == 0:
+            print(f"  epoch {epoch + 1}/{epochs} step {step}/{total_train_steps}: loss={outputs.loss.item():.4f}")
+            _append_jsonl(log_path, {"type": "train", "step": step, "loss": outputs.loss.item()})
 
-            if val_examples and step % eval_every == 0:
+        if step % eval_every == 0:
+            if val_examples:
                 val_loss = _evaluate_val_loss(model, val_examples)
                 improved = val_loss < best_val_loss - 1e-4
                 print(f"  [val] step {step}: val_loss={val_loss:.4f}"
                       f" (best={best_val_loss:.4f})" + (" -- new best, saving" if improved else ""))
+                _append_jsonl(log_path, {"type": "val", "step": step, "val_loss": val_loss, "best_val_loss": best_val_loss})
                 if improved:
                     best_val_loss = val_loss
                     evals_without_improvement = 0
                     _save_checkpoint(model, processor, output_dir, regime)
                 else:
                     evals_without_improvement += 1
-                    if evals_without_improvement >= patience:
-                        print(f"  Early stopping: no val_loss improvement for {patience} checks "
-                              f"(best={best_val_loss:.4f}). Stopping at step {step}.")
-                        stop_early = True
-                        break
+
+            # Unconditional crash-safety checkpoint -- saved every eval_every steps
+            # regardless of whether validation improved (or whether validation is
+            # even enabled), so an interrupted run has somewhere recent to resume from.
+            _save_resume_state(last_dir, model, processor, regime, optimizer,
+                                step, best_val_loss, evals_without_improvement)
+
+            if val_examples and evals_without_improvement >= patience:
+                print(f"  Early stopping: no val_loss improvement for {patience} checks "
+                      f"(best={best_val_loss:.4f}). Stopping at step {step}.")
+                break
 
     if step % grad_accum_steps != 0:
         optimizer.step()
@@ -454,10 +546,15 @@ if __name__ == "__main__":
                              help="Stop after this many validation checks with no improvement.")
         parser.add_argument("--eval-every", type=int, default=None,
                              help="Validate every N optimizer steps. Default: auto (~5 checks/epoch).")
+        parser.add_argument("--resume", action="store_true",
+                             help="Continue from <output-dir>_last/training_state.pt if it exists "
+                                  "(model weights + optimizer state + step/best-val counters), "
+                                  "instead of starting over. No-op with a warning if nothing is there.")
         args = parser.parse_args()
 
         run_finetune(
             regime=args.regime, n_studies=args.n_studies, epochs=args.epochs, lr=args.lr,
             grad_accum_steps=args.grad_accum_steps, lora_r=args.lora_r, output_dir=args.output_dir,
             val_frac=args.val_frac, patience=args.patience, eval_every=args.eval_every,
+            resume=args.resume,
         )

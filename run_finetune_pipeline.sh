@@ -54,6 +54,12 @@ RUN_FULL_FT="${RUN_FULL_FT:-1}"
 LORA_DIR="models/lora_chexpert_2b"
 QLORA_DIR="models/qlora_chexpert_2b"
 FULL_FT_DIR="models/full_chexpert_2b"
+# Fine-tuning always trains on rows [0, N_FINETUNE_STUDIES). Evaluating a
+# fine-tuned regime on the same rows would score it on its own training data,
+# inflating every downstream quality metric -- so LoRA/QLoRA/full eval reads
+# from just past that range instead (frozen eval, already done, is unaffected
+# since it was never trained on anything and correctly used offset 0).
+AGENTIC_OFFSET="$((N_FINETUNE_STUDIES + 100))"
 
 echo -e "${BOLD}Context-Aligned Medical VLM -- fine-tuning comparison pipeline${RESET}"
 echo -e "${DIM}$(date)${RESET}"
@@ -88,7 +94,7 @@ if is_done finetune_lora_train; then
   ok "LoRA adapter already trained at $LORA_DIR, skipping."
 else
   python3 src/vlm/finetune_qwen.py --regime lora --n-studies "$N_FINETUNE_STUDIES" --epochs "$EPOCHS" \
-    --output-dir "$LORA_DIR"
+    --output-dir "$LORA_DIR" --resume
   mark_done finetune_lora_train
 fi
 step_done "LoRA adapter ready"
@@ -99,7 +105,7 @@ if is_done finetune_lora_eval; then
   ok "LoRA already evaluated, skipping."
 else
   python3 run_chexpert_eval.py --model qwen2-vl --n-ablation "$N_ABLATION" --n-agentic "$N_AGENTIC" \
-    --adapter-path "$LORA_DIR" --finetune-regime lora
+    --adapter-path "$LORA_DIR" --finetune-regime lora --agentic-offset "$AGENTIC_OFFSET"
   mark_done finetune_lora_eval
 fi
 step_done "LoRA evaluated"
@@ -110,14 +116,14 @@ if is_done finetune_qlora_train; then
   ok "QLoRA adapter already trained at $QLORA_DIR, skipping."
 else
   python3 src/vlm/finetune_qwen.py --regime qlora --n-studies "$N_FINETUNE_STUDIES" --epochs "$EPOCHS" \
-    --output-dir "$QLORA_DIR"
+    --output-dir "$QLORA_DIR" --resume
   mark_done finetune_qlora_train
 fi
 if is_done finetune_qlora_eval; then
   ok "QLoRA already evaluated, skipping."
 else
   python3 run_chexpert_eval.py --model qwen2-vl --n-ablation "$N_ABLATION" --n-agentic "$N_AGENTIC" \
-    --adapter-path "$QLORA_DIR" --finetune-regime qlora
+    --adapter-path "$QLORA_DIR" --finetune-regime qlora --agentic-offset "$AGENTIC_OFFSET"
   mark_done finetune_qlora_eval
 fi
 step_done "QLoRA trained + evaluated"
@@ -134,14 +140,14 @@ else
     ok "Full-FT checkpoint already trained at $FULL_FT_DIR, skipping."
   else
     python3 src/vlm/finetune_qwen.py --regime full --n-studies "$N_FINETUNE_STUDIES" --epochs "$EPOCHS" \
-      --output-dir "$FULL_FT_DIR"
+      --output-dir "$FULL_FT_DIR" --resume
     mark_done finetune_full_train
   fi
   if is_done finetune_full_eval; then
     ok "Full-FT already evaluated, skipping."
   else
     python3 run_chexpert_eval.py --model qwen2-vl --n-ablation "$N_ABLATION" --n-agentic "$N_AGENTIC" \
-      --model-path "$FULL_FT_DIR" --finetune-regime full
+      --model-path "$FULL_FT_DIR" --finetune-regime full --agentic-offset "$AGENTIC_OFFSET"
     mark_done finetune_full_eval
   fi
 fi

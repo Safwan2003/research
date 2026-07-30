@@ -195,6 +195,7 @@ def load_chexpert_dataset(
     csv_path: str, images_root: str, limit: Optional[int] = None,
     uncertain_policy: str = "u_zeros",
     target_finding: str = DEFAULT_CHEXPERT_TARGET_FINDING,
+    offset: int = 0,
 ) -> list:
     """
     Load CheXpert studies from a CSV file (e.g., train.csv / valid.csv).
@@ -219,10 +220,17 @@ def load_chexpert_dataset(
     feature trivially leaking the label). The real-report case doesn't have
     this concern: real radiology text legitimately correlating with the
     diagnosis is genuine signal, not an engineered shortcut.
+
+    offset: skip this many rows before taking `limit`. Used to carve out a
+    slice that's disjoint from whatever rows src/vlm/finetune_qwen.py trained
+    on (which always starts at row 0) -- evaluating a fine-tuned model on
+    studies it was also trained on inflates every downstream quality metric.
     """
     import pandas as pd
 
     df = pd.read_csv(csv_path)
+    if offset:
+        df = df.iloc[offset:]
     if limit:
         df = df.head(limit)
 
