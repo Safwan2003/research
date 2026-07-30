@@ -232,20 +232,35 @@ def run_finetune(
             model_name, torch_dtype=torch.float16, device_map=device
         )
 
+    model.config.use_cache = False  # required alongside gradient checkpointing, all regimes
+
     if regime == "full":
         model.gradient_checkpointing_enable()
-        model.config.use_cache = False  # required alongside gradient checkpointing
         for p in model.parameters():
             p.requires_grad_(True)
         n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         n_total = sum(p.numel() for p in model.parameters())
         print(f"Full fine-tuning: {n_trainable:,} / {n_total:,} parameters trainable (100%).")
     else:
+        # "qlora" already gets gradient checkpointing from prepare_model_for_kbit_training
+        # above. Plain "lora" didn't have it at all until now -- storing every layer's
+        # full-precision activations for a ~2B-param model's backward pass (Qwen2-VL's
+        # vision tokens make the sequence long) is what actually OOM'd a 16GB GPU here,
+        # not the ~18M trainable LoRA params themselves. enable_input_require_grads() is
+        # required alongside checkpointing when the base model's own params are frozen
+        # (peft's kbit path does this internally; the plain-LoRA path needs it explicitly).
+        if regime == "lora":
+            model.gradient_checkpointing_enable()
+            model.enable_input_require_grads()
         model = _build_lora_model(model, r=lora_r, alpha=lora_alpha, dropout=lora_dropout)
 
     model.train()
 
-    processor = AutoProcessor.from_pretrained(model_name)
+    # Cap Qwen2-VL's dynamic image resolution -> vision-token count. Left uncapped,
+    # a single CheXpert image can expand into enough vision tokens that, combined
+    # with backprop activations, exceeds 16GB even with checkpointing. 256*28*28 is
+    # generous for a chest X-ray classification/grounding task (not fine print).
+    processor = AutoProcessor.from_pretrained(model_name, min_pixels=64 * 28 * 28, max_pixels=256 * 28 * 28)
 
     if regime == "full":
         # 8-bit Adam (bitsandbytes) keeps optimizer state at ~1/4 the memory
