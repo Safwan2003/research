@@ -838,6 +838,35 @@
         }
       },
       "notes": ""
+    },
+    {
+      "run_id": "637b550a-a162-4cb3-8d43-48a896de1a6c",
+      "timestamp_utc": "2026-07-31T08:34:47.028501+00:00",
+      "git_commit": "3fe3c897d5f733b2b4357b91b763cbd59aa6d15f",
+      "host": "FBS-RESEARCHLAB-WS73",
+      "mode": "ablation",
+      "config_snapshot": {
+        "seed": 42,
+        "n_studies": 5000,
+        "n_studies_requested": 5000,
+        "dataset": "chexpert",
+        "model_family": "qwen2-vl",
+        "text_embedding_source": "sentence-transformers/all-MiniLM-L6-v2",
+        "synthetic": false,
+        "finetune_regime": "frozen",
+        "target_finding": "Cardiomegaly"
+      },
+      "results": {
+        "ablation": {
+          "Radiomics only": 0.5445386948325384,
+          "XAI only": 0.515518027965695,
+          "Text only": 0.6758120321571527,
+          "Radiomics + Text": 0.6744733908467131,
+          "XAI + Text": 0.6789202262518914,
+          "Radiomics + XAI + Text": 0.6760789227653341
+        }
+      },
+      "notes": ""
     }
   ]
 }
