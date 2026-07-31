@@ -34,8 +34,7 @@ from urllib.parse import quote, urlsplit
 
 PROJECT_ROOT = Path(__file__).parent.parent
 SAS_PATH = PROJECT_ROOT / "secrets" / "chexpert_sas_url.txt"
-TRAIN_CSV = PROJECT_ROOT / "data" / "chexpert" / "train.csv"
-IMAGES_ROOT = PROJECT_ROOT / "data" / "chexpert"
+DEFAULT_DATA_ROOT = PROJECT_ROOT / "data" / "chexpert"
 
 CSV_TRAIN_PREFIX = "CheXpert-v1.0/train/"
 
@@ -65,16 +64,28 @@ def main():
                          help="Ensure images for the first N rows of train.csv are present locally.")
     parser.add_argument("--batch", default="CheXpert-v1.0 batch 2 (train 1).zip",
                          help="Which training batch blob to pull from (default covers the lowest patient IDs).")
+    parser.add_argument(
+        "--data-root", default=None,
+        help="Where train.csv lives and images get written, e.g. to target a different drive "
+             "for a large download without touching the default data/chexpert/ (default: "
+             f"{DEFAULT_DATA_ROOT}). Must already contain train.csv (copy it there first -- "
+             "it doesn't need the images, just the CSV of paths/labels).",
+    )
     args = parser.parse_args()
+
+    data_root = Path(args.data_root) if args.data_root else DEFAULT_DATA_ROOT
+    train_csv = data_root / "train.csv"
+    images_root = data_root
 
     if not SAS_PATH.exists():
         sys.exit(f"Missing {SAS_PATH} -- create it first (see antigravity-prompt.txt).")
-    if not TRAIN_CSV.exists():
-        sys.exit(f"Missing {TRAIN_CSV} -- run the batch-1 (validate & csv) download first, it contains train.csv.")
+    if not train_csv.exists():
+        sys.exit(f"Missing {train_csv} -- run the batch-1 (validate & csv) download first (or copy "
+                  f"train.csv from {DEFAULT_DATA_ROOT} if --data-root points somewhere new).")
 
     sas_url = SAS_PATH.read_text().strip()
 
-    with open(TRAIN_CSV, newline="") as f:
+    with open(train_csv, newline="") as f:
         reader = csv.DictReader(f)
         rows = [row for _, row in zip(range(args.n_studies), reader)]
 
@@ -86,7 +97,7 @@ def main():
         rel = row["Path"]
         if not rel.startswith(CSV_TRAIN_PREFIX):
             continue  # not a train-split row, skip
-        local_path = IMAGES_ROOT / rel
+        local_path = images_root / rel
         if not local_path.exists():
             missing.append(rel)
 
@@ -109,7 +120,7 @@ def main():
         max_retries = 5
         for i, rel in enumerate(missing, 1):
             entry_name = batch_root + rel[len(CSV_TRAIN_PREFIX):]
-            local_path = IMAGES_ROOT / rel
+            local_path = images_root / rel
             sys.stdout.write(_progress_bar(i, len(missing), start_time, rel.split("/")[-2] + "/" + rel.split("/")[-1]))
             sys.stdout.flush()
 
