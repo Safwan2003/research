@@ -83,6 +83,20 @@ GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'
 banner() { echo; echo -e "${BOLD}${CYAN}==> $1${RESET}"; }
 ok()     { echo -e "  ${GREEN}[OK]${RESET} $1"; }
 warn()   { echo -e "  ${YELLOW}[!]${RESET} $1"; }
+# `colab status -s <name>` always exits 0, even when <name> doesn't exist --
+# it just prints "[colab] Session '<name>' not found." to stdout (confirmed
+# by reading colab_cli/commands/session.py's status(): the "not found" branch
+# never raises typer.Exit(1)). Checking only the exit code (what this used to
+# do) always looks like success, so a session that was never created (or
+# already died) gets silently treated as alive, and the first command that
+# actually needs real session state -- e.g. drivemount -- crashes with
+# AttributeError: 'NoneType' object has no attribute 'url'. The text is the
+# only reliable signal the CLI gives; parse it instead.
+_session_exists() {
+  local output
+  output="$(colab status -s "$1" 2>&1 || true)"
+  [[ "$output" != *"not found"* ]]
+}
 fail()   { echo -e "  ${RED}[FAIL]${RESET} $1" >&2; }
 
 COLAB_GPU="${COLAB_GPU:-T4}"                          # paper's own setup uses a Tesla T4 -- see CLAUDE.md
@@ -161,7 +175,7 @@ mkdir -p "$PULL_DIR"
 
 # --- 1. Provision (or reuse) the remote GPU session -----------------------------
 banner "1/7 Provisioning Colab session '${SESSION}' (${COLAB_GPU})"
-if colab status -s "$SESSION" >/dev/null 2>&1; then
+if _session_exists "$SESSION"; then
   ok "Session '${SESSION}' already exists, reusing it."
 else
   colab new -s "$SESSION" --gpu "$COLAB_GPU"
@@ -283,7 +297,7 @@ while true; do
     STATUS="$(tr -d '[:space:]' < "$LOCAL_TMP/status")"
     break
   fi
-  if ! colab status -s "$SESSION" >/dev/null 2>&1; then
+  if ! _session_exists "$SESSION"; then
     fail "Session '${SESSION}' is no longer alive (likely stopped by Colab -- quota/timeout)."
     echo "  Nothing important is lost: models/, .setup_markers/, and results/ are symlinked"
     echo "  into Google Drive (${DRIVE_STATE}) and survive the VM being torn down."
