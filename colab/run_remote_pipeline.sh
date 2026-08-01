@@ -126,15 +126,32 @@ if [ ! -f .env ]; then
 fi
 # shellcheck disable=SC1091
 set -a; source .env; set +a
+
+# Falls back to secrets/chexpert_sas_url.txt -- the older convention
+# config.py's _load_chexpert_sas_url() already treats as equivalent to
+# CHEXPERT_SAS_URL in .env -- so this preflight (and what actually gets
+# uploaded below) doesn't fail for anyone who only ever set up the secret
+# that way and never duplicated it into .env.
+if [ -z "${CHEXPERT_SAS_URL:-}" ] && [ -f secrets/chexpert_sas_url.txt ]; then
+  CHEXPERT_SAS_URL="$(tr -d '[:space:]' < secrets/chexpert_sas_url.txt)"
+fi
 if [ -z "${CHEXPERT_SAS_URL:-}" ]; then
-  fail "CHEXPERT_SAS_URL is empty in .env -- the remote runtime needs it to download CheXpert."
+  fail "CHEXPERT_SAS_URL is empty in both .env and secrets/chexpert_sas_url.txt -- the remote runtime needs it to download CheXpert."
   exit 1
 fi
+export CHEXPERT_SAS_URL
 if [ -z "${GITHUB_TOKEN:-}" ]; then
   warn "GITHUB_TOKEN is empty in .env -- results will still be pulled to your laptop, but the "
   warn "final 'push to GitHub as backup' step will be skipped."
 fi
 ok ".env loaded (values not printed)."
+
+# What actually gets uploaded to the VM (see step 3 below) -- built from the
+# resolved values above rather than uploading the local .env file verbatim,
+# so the secrets/ fallback above actually reaches the remote runtime too
+# (a raw file upload wouldn't see values that only got resolved into this
+# shell's environment).
+printf 'CHEXPERT_SAS_URL=%s\nGITHUB_TOKEN=%s\n' "$CHEXPERT_SAS_URL" "${GITHUB_TOKEN:-}" > "$LOCAL_TMP/.env.resolved"
 
 GIT_REMOTE_URL="$(git remote get-url origin)"
 GIT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
@@ -248,8 +265,8 @@ _make_driver_py > "$LOCAL_TMP/driver.py"
 
 # ${REMOTE_PATH} doesn't exist yet on a first run -- create it before uploading .env into it.
 colab exec -s "$SESSION" --timeout 60 <<< "import os; os.makedirs('${REMOTE_PATH}', exist_ok=True)"
-colab upload -s "$SESSION" .env "${REMOTE_PATH}/.env"
-ok "Uploaded .env to ${REMOTE_PATH}/.env on the VM (not printed, not committed)."
+colab upload -s "$SESSION" "$LOCAL_TMP/.env.resolved" "${REMOTE_PATH}/.env"
+ok "Uploaded resolved CHEXPERT_SAS_URL/GITHUB_TOKEN to ${REMOTE_PATH}/.env on the VM (not printed, not committed)."
 
 colab exec -s "$SESSION" -f "$LOCAL_TMP/driver.py" --timeout 900
 ok "Setup complete, pipeline launched in the background on the VM."
