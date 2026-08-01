@@ -232,7 +232,22 @@ if not os.path.isdir(os.path.join(repo_dir, ".git")):
 run(["git", "-C", repo_dir, "fetch", "origin"])
 run(["git", "-C", repo_dir, "checkout", "${GIT_BRANCH}"])
 run(["git", "-C", repo_dir, "pull", "origin", "${GIT_BRANCH}"])
-run(["python3", "-m", "venv", os.path.join(repo_dir, ".venv")])
+
+venv_dir = os.path.join(repo_dir, ".venv")
+try:
+    run(["python3", "-m", "venv", venv_dir])
+except subprocess.CalledProcessError:
+    # Colab's base VM image commonly ships a system Python without ensurepip,
+    # so plain `python3 -m venv` fails there with "ensurepip is not
+    # available" -- a known Colab quirk (not this repo). python3-venv pulls
+    # in a working ensurepip; retry once after installing it. run_finetune_
+    # pipeline.sh hard-requires .venv to already exist (it refuses to create
+    # one itself), so this can't just be skipped.
+    print("venv creation failed -- installing python3-venv and retrying...", flush=True)
+    shutil.rmtree(venv_dir, ignore_errors=True)  # venv leaves a partial dir behind on failure
+    run(["apt-get", "update", "-qq"])
+    run(["apt-get", "install", "-y", "-qq", "python3-venv"])
+    run(["python3", "-m", "venv", venv_dir])
 
 # Symlink the small, checkpoint-bearing dirs into Drive so a killed/quota-exhausted
 # session doesn't lose progress -- run_finetune_pipeline.sh and finetune_qwen.py's
