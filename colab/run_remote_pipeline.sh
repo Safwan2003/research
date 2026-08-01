@@ -221,7 +221,14 @@ def run(cmd, **kw):
     subprocess.run(cmd, check=True, **kw)
 
 if not os.path.isdir(os.path.join(repo_dir, ".git")):
-    run(["git", "clone", "${GIT_REMOTE_URL}", repo_dir])
+    # NOT `git clone url repo_dir` -- repo_dir already exists and is
+    # non-empty by this point (.env was uploaded into it just before this
+    # driver runs, see step 3 below), and `git clone` refuses to clone into
+    # an existing non-empty directory (fatal: destination path ... already
+    # exists and is not an empty directory, exit 128). git init + remote add
+    # works on an existing non-empty directory, since it only touches .git/.
+    run(["git", "init", repo_dir])
+    run(["git", "-C", repo_dir, "remote", "add", "origin", "${GIT_REMOTE_URL}"])
 run(["git", "-C", repo_dir, "fetch", "origin"])
 run(["git", "-C", repo_dir, "checkout", "${GIT_BRANCH}"])
 run(["git", "-C", repo_dir, "pull", "origin", "${GIT_BRANCH}"])
