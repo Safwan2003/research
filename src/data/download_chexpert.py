@@ -2,18 +2,15 @@
 Download CheXpert dataset batches from Stanford Azure Blob Storage link into data/chexpert/
 """
 
-import os
 import zipfile
 import urllib.request
 import urllib.parse
 from pathlib import Path
+from urllib.parse import urlsplit
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import config
-
-BASE_BLOB_URL = "https://aimistanforddatasets01.blob.core.windows.net/chexpertchestxrays-u20210408"
-SAS_TOKEN = "sv=2019-02-02&sr=c&sig=EfKePbHmlzi4voPAdUKcBBYZmgd3G1MgMWrAsDEvjnU%3D&st=2026-07-22T07%3A44%3A14Z&se=2026-08-21T07%3A49%3A14Z&sp=rl"
 
 BLOBS_TO_DOWNLOAD = [
     "CheXpert-v1.0 batch 1 (validate & csv).zip",
@@ -21,9 +18,19 @@ BLOBS_TO_DOWNLOAD = [
 ]
 
 
-def download_blob(blob_name: str, target_dir: Path):
-    encoded_name = urllib.parse.quote(blob_name)
-    download_url = f"{BASE_BLOB_URL}/{encoded_name}?{SAS_TOKEN}"
+def _blob_url(sas_url: str, blob_name: str) -> str:
+    """
+    Same URL-building shape as scripts/download_chexpert_subset.py's
+    _blob_url() -- both scripts must accept the identical full-SAS-URL
+    format stored in .env / secrets/chexpert_sas_url.txt.
+    """
+    parts = urlsplit(sas_url)
+    base = f"{parts.scheme}://{parts.netloc}{parts.path}"
+    return f"{base}/{urllib.parse.quote(blob_name)}?{parts.query}"
+
+
+def download_blob(blob_name: str, target_dir: Path, sas_url: str):
+    download_url = _blob_url(sas_url, blob_name)
     zip_path = target_dir / blob_name
 
     if not zip_path.exists():
@@ -54,11 +61,18 @@ def download_blob(blob_name: str, target_dir: Path):
 
 
 def download_chexpert():
+    if not config.CHEXPERT_SAS_URL:
+        sys.exit(
+            "Missing CHEXPERT_SAS_URL -- set it in .env (copy .env.example to .env and fill it "
+            "in) or in secrets/chexpert_sas_url.txt. Get the SAS URL from your professor / "
+            "Stanford AIMI's CheXpert access page; never hardcode it into a tracked .py file."
+        )
+
     chexpert_dir = Path(config.CHEXPERT_IMAGES_ROOT)
     chexpert_dir.mkdir(parents=True, exist_ok=True)
 
     for blob_name in BLOBS_TO_DOWNLOAD:
-        download_blob(blob_name, chexpert_dir)
+        download_blob(blob_name, chexpert_dir, config.CHEXPERT_SAS_URL)
 
     print("\nCheXpert download and extraction complete!")
     print(f"CSV Files found: {list(chexpert_dir.glob('**/*.csv'))}")

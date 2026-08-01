@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Fine-tuning comparison pipeline: rerun the frozen CheXpert eval (post
+# Fine-tuning comparison pipeline: download a representative random sample
+# (patient-level stratified, not the old "first N rows" bias -- see
+# src/data/dataset.py / CLAUDE.md) -> rerun the frozen CheXpert eval (post
 # label-leakage fix) -> train+evaluate LoRA -> train+evaluate QLoRA ->
 # train+evaluate full fine-tuning -> compile one comparison report across
 # all four regimes. Assumes run_master.sh has already been run at least once
@@ -54,12 +56,15 @@ RUN_FULL_FT="${RUN_FULL_FT:-1}"
 LORA_DIR="models/lora_chexpert_2b"
 QLORA_DIR="models/qlora_chexpert_2b"
 FULL_FT_DIR="models/full_chexpert_2b"
-# Fine-tuning always trains on rows [0, N_FINETUNE_STUDIES). Evaluating a
-# fine-tuned regime on the same rows would score it on its own training data,
-# inflating every downstream quality metric -- so LoRA/QLoRA/full eval reads
-# from just past that range instead (frozen eval, already done, is unaffected
-# since it was never trained on anything and correctly used offset 0).
-AGENTIC_OFFSET="$((N_FINETUNE_STUDIES + 100))"
+# Fine-tuning trains on a patient-level random sample covering row-budget
+# [0, N_FINETUNE_STUDIES) of the canonical sample order (see
+# src/data/dataset.py's sample_chexpert_patients/load_chexpert_dataset).
+# run_chexpert_eval.py's LoRA/QLoRA/full eval steps read the
+# train_patient_ids.json sidecar each training run writes and exclude
+# EXACTLY those patients -- no offset guess/fudge-factor needed anymore
+# (this used to be "+100" to approximate a margin; that's gone). This value
+# is still passed as a fallback offset for the rare case no sidecar is found.
+AGENTIC_OFFSET="$N_FINETUNE_STUDIES"
 
 echo -e "${BOLD}Context-Aligned Medical VLM -- fine-tuning comparison pipeline${RESET}"
 echo -e "${DIM}$(date)${RESET}"
@@ -73,63 +78,84 @@ fi
 source .venv/bin/activate
 
 # --- 1. Install fine-tuning deps (peft/bitsandbytes) --------------------------
-banner "1/7 Installing peft/bitsandbytes"
+banner "1/8 Installing peft/bitsandbytes"
 pip install -r requirements.txt
 ok "requirements.txt (incl. peft/bitsandbytes) installed."
 step_done
 
-# --- 2. Rerun the FROZEN baseline (post label-leakage fix) --------------------
-banner "2/7 Frozen baseline (post leakage-fix rerun)"
+# --- 2. Download a representative random sample --------------------------------
+# Patient-level stratified-random (see src/data/dataset.py), not the old
+# "first N rows of train.csv" bug -- that gave a narrow, single-patient-ID-
+# range slice and let a patient's images straddle the train/held-out split.
+# Covers: the ablation sample [0, N_ABLATION), the fine-tuning training
+# slice [0, N_FINETUNE_STUDIES), and the held-out eval slice
+# [N_FINETUNE_STUDIES, N_FINETUNE_STUDIES+N_AGENTIC) -- same seed/target-
+# finding as config.py defaults throughout, so all three calls agree on one
+# canonical patient order.
+banner "2/8 Downloading representative random CheXpert sample"
+if is_done finetune_download_sample; then
+  ok "Random sample already downloaded, skipping."
+else
+  python3 scripts/download_chexpert_subset.py --n-studies "$N_ABLATION" --sample-strategy random
+  python3 scripts/download_chexpert_subset.py --n-studies "$N_FINETUNE_STUDIES" --sample-strategy random
+  python3 scripts/download_chexpert_subset.py --n-studies "$N_AGENTIC" --sample-strategy random --offset "$AGENTIC_OFFSET"
+  mark_done finetune_download_sample
+fi
+step_done "sample present locally"
+
+# --- 3. Rerun the FROZEN baseline (post label-leakage fix) --------------------
+banner "3/8 Frozen baseline (post leakage-fix rerun)"
 if is_done finetune_frozen_rerun; then
   ok "Already reran the frozen baseline after the fix, skipping."
 else
-  python3 run_chexpert_eval.py --model qwen2-vl --n-ablation "$N_ABLATION" --n-agentic "$N_AGENTIC"
+  python3 run_chexpert_eval.py --model qwen2-vl --n-ablation "$N_ABLATION" --n-agentic "$N_AGENTIC" \
+    --sample-strategy random
   mark_done finetune_frozen_rerun
 fi
 step_done "frozen baseline logged"
 
-# --- 3. Train LoRA adapter -----------------------------------------------------
-banner "3/7 Training LoRA adapter"
+# --- 4. Train LoRA adapter -----------------------------------------------------
+banner "4/8 Training LoRA adapter"
 if is_done finetune_lora_train; then
   ok "LoRA adapter already trained at $LORA_DIR, skipping."
 else
   python3 src/vlm/finetune_qwen.py --regime lora --n-studies "$N_FINETUNE_STUDIES" --epochs "$EPOCHS" \
-    --output-dir "$LORA_DIR" --resume
+    --output-dir "$LORA_DIR" --sample-strategy random --resume
   mark_done finetune_lora_train
 fi
 step_done "LoRA adapter ready"
 
-# --- 4. Evaluate LoRA -----------------------------------------------------------
-banner "4/7 Evaluating LoRA adapter"
+# --- 5. Evaluate LoRA -----------------------------------------------------------
+banner "5/8 Evaluating LoRA adapter"
 if is_done finetune_lora_eval; then
   ok "LoRA already evaluated, skipping."
 else
   python3 run_chexpert_eval.py --model qwen2-vl --n-ablation "$N_ABLATION" --n-agentic "$N_AGENTIC" \
-    --adapter-path "$LORA_DIR" --finetune-regime lora --agentic-offset "$AGENTIC_OFFSET"
+    --adapter-path "$LORA_DIR" --finetune-regime lora --sample-strategy random --agentic-offset "$AGENTIC_OFFSET"
   mark_done finetune_lora_eval
 fi
 step_done "LoRA evaluated"
 
-# --- 5. Train + evaluate QLoRA ---------------------------------------------------
-banner "5/7 Training + evaluating QLoRA adapter"
+# --- 6. Train + evaluate QLoRA ---------------------------------------------------
+banner "6/8 Training + evaluating QLoRA adapter"
 if is_done finetune_qlora_train; then
   ok "QLoRA adapter already trained at $QLORA_DIR, skipping."
 else
   python3 src/vlm/finetune_qwen.py --regime qlora --n-studies "$N_FINETUNE_STUDIES" --epochs "$EPOCHS" \
-    --output-dir "$QLORA_DIR" --resume
+    --output-dir "$QLORA_DIR" --sample-strategy random --resume
   mark_done finetune_qlora_train
 fi
 if is_done finetune_qlora_eval; then
   ok "QLoRA already evaluated, skipping."
 else
   python3 run_chexpert_eval.py --model qwen2-vl --n-ablation "$N_ABLATION" --n-agentic "$N_AGENTIC" \
-    --adapter-path "$QLORA_DIR" --finetune-regime qlora --agentic-offset "$AGENTIC_OFFSET"
+    --adapter-path "$QLORA_DIR" --finetune-regime qlora --sample-strategy random --agentic-offset "$AGENTIC_OFFSET"
   mark_done finetune_qlora_eval
 fi
 step_done "QLoRA trained + evaluated"
 
-# --- 6. Train + evaluate FULL fine-tuning -----------------------------------------
-banner "6/7 Training + evaluating full fine-tuning"
+# --- 7. Train + evaluate FULL fine-tuning -----------------------------------------
+banner "7/8 Training + evaluating full fine-tuning"
 if [ "$RUN_FULL_FT" != "1" ]; then
   warn "RUN_FULL_FT=$RUN_FULL_FT -- skipping full fine-tuning. The comparison report will only"
   warn "have frozen/LoRA/QLoRA rows. Set RUN_FULL_FT=1 (default) to include it."
@@ -140,21 +166,21 @@ else
     ok "Full-FT checkpoint already trained at $FULL_FT_DIR, skipping."
   else
     python3 src/vlm/finetune_qwen.py --regime full --n-studies "$N_FINETUNE_STUDIES" --epochs "$EPOCHS" \
-      --output-dir "$FULL_FT_DIR" --resume
+      --output-dir "$FULL_FT_DIR" --sample-strategy random --resume
     mark_done finetune_full_train
   fi
   if is_done finetune_full_eval; then
     ok "Full-FT already evaluated, skipping."
   else
     python3 run_chexpert_eval.py --model qwen2-vl --n-ablation "$N_ABLATION" --n-agentic "$N_AGENTIC" \
-      --model-path "$FULL_FT_DIR" --finetune-regime full --agentic-offset "$AGENTIC_OFFSET"
+      --model-path "$FULL_FT_DIR" --finetune-regime full --sample-strategy random --agentic-offset "$AGENTIC_OFFSET"
     mark_done finetune_full_eval
   fi
 fi
 step_done "full fine-tuning stage complete"
 
-# --- 7. Compile the comparison report -------------------------------------------
-banner "7/7 Compiling comparison report"
+# --- 8. Compile the comparison report -------------------------------------------
+banner "8/8 Compiling comparison report"
 python3 scripts/compile_finetune_comparison.py
 step_done "report written"
 

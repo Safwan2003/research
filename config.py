@@ -3,9 +3,40 @@ Central configuration. Edit these paths/settings for your environment
 before running run_pipeline.py.
 """
 
+import os
 from pathlib import Path
+from typing import Optional
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+except ImportError:
+    pass  # python-dotenv not installed -- fine as long as secrets come from real env vars instead
 
 PROJECT_ROOT = Path(__file__).parent
+
+# --- Secrets (see .env.example) -- never hardcode real values here or anywhere else in the repo ---
+
+_SAS_URL_FALLBACK_FILE = PROJECT_ROOT / "secrets" / "chexpert_sas_url.txt"
+
+
+def _load_chexpert_sas_url() -> Optional[str]:
+    """
+    CHEXPERT_SAS_URL from .env / the real environment takes priority. Falls
+    back to secrets/chexpert_sas_url.txt (the older convention run_master.sh's
+    bash side still reads directly) so switching to .env isn't a forced
+    migration for anyone still using that file.
+    """
+    env_val = os.environ.get("CHEXPERT_SAS_URL")
+    if env_val:
+        return env_val
+    if _SAS_URL_FALLBACK_FILE.exists():
+        return _SAS_URL_FALLBACK_FILE.read_text().strip()
+    return None
+
+
+CHEXPERT_SAS_URL = _load_chexpert_sas_url()
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN") or None  # only used by colab/run_remote_pipeline.sh's backup push
 
 # --- Data paths (edit these once you have access to the datasets) ---
 OPENI_REPORTS_DIR = PROJECT_ROOT / "data" / "openi" / "reports"

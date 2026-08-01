@@ -18,7 +18,16 @@ secrets/
 /data/
 .setup_markers/
 
+# Per-study checkpoints for run_chexpert_eval.py's ablation/agentic loops
+# (src/features/radiomics.py etc. output cached per study) -- local-only,
+# reproducible from the studies + model, lets a killed run resume mid-step.
+.eval_checkpoints/
+
 # Trained LoRA/QLoRA adapters and full-fine-tune checkpoints (src/vlm/finetune_qwen.py
 # output) -- can be several GB, machine-specific, and reproducible from the training
 # script + logged config_snapshot, so not committed.
 /models/
+
+# Local cache of results pulled back from a colab/run_remote_pipeline.sh run --
+# results/ (merged, de-duplicated) is the source of truth once colab/merge_results.py runs.
+colab/pulled_results/

@@ -95,7 +95,11 @@ def _get_reasoner(
     raise ValueError(f"Unknown model_family: {model_family}")
 
 
-def _load_real_studies(n: int, uncertain_policy: str, offset: int = 0):
+def _load_real_studies(
+    n: int, uncertain_policy: str, offset: int = 0,
+    sample_strategy: str = "sequential", seed: int = None, stratify: bool = True,
+    patient_ids: list = None,
+):
     from dataset import load_chexpert_dataset
 
     # NOTE: this must NOT silently fall back to valid.csv (234 studies) --
@@ -112,7 +116,28 @@ def _load_real_studies(n: int, uncertain_policy: str, offset: int = 0):
         uncertain_policy=uncertain_policy,
         target_finding=config.CHEXPERT_TARGET_FINDING,
         offset=offset,
+        sample_strategy=sample_strategy,
+        seed=seed if seed is not None else config.RANDOM_SEED,
+        stratify=stratify,
+        patient_ids=patient_ids,
     )
+
+
+def _sidecar_train_patient_ids(adapter_or_model_path: str):
+    """
+    Read <adapter_or_model_path>_last/train_patient_ids.json, written by
+    src/vlm/finetune_qwen.py's run_finetune() when it trains with
+    sample_strategy="random". Returns the set of patient ids it trained on,
+    or None if no such sidecar exists (e.g. that run used sample_strategy=
+    "sequential", or predates this feature) -- caller should fall back to
+    offset-based exclusion in that case.
+    """
+    if not adapter_or_model_path:
+        return None
+    sidecar_path = Path(adapter_or_model_path.rstrip("/") + "_last") / "train_patient_ids.json"
+    if not sidecar_path.exists():
+        return None
+    return set(json.loads(sidecar_path.read_text())["patient_ids"])
 
 
 def _progress(done: int, total: int, start_time, label: str = "", width: int = 30) -> None:
@@ -136,6 +161,66 @@ def _progress(done: int, total: int, start_time, label: str = "", width: int = 3
         f"elapsed={elapsed:6.1f}s  eta={eta:6.1f}s  {label[:40]:<40}",
         end=end, flush=True,
     )
+
+
+_CHECKPOINT_DIR = Path(".eval_checkpoints")
+
+
+def _append_jsonl(path: Path, record: dict) -> None:
+    """Append one record and flush immediately -- a crash right after this call must not lose it."""
+    _CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        f.write(json.dumps(record) + "\n")
+        f.flush()
+
+
+def _read_jsonl(path: Path) -> dict:
+    """Returns {record["study_id"]: record} for every line, or {} if the file doesn't exist yet."""
+    if not path.exists():
+        return {}
+    out = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                rec = json.loads(line)
+                out[rec["study_id"]] = rec
+    return out
+
+
+def _ablation_checkpoint_path(n_studies: int, sample_strategy: str) -> Path:
+    """
+    Ablation is pure sklearn over extracted radiomics/XAI/text features and
+    never touches the VLM (see run_ablation_on_chexpert's own comment) -- the
+    exact same study set gets re-extracted on every regime's eval call in
+    run_finetune_pipeline.sh (frozen, lora, qlora, full each call this once)
+    even though nothing regime-specific affects it. So this cache is
+    deliberately keyed WITHOUT finetune_regime, shared across all of them --
+    the first call in a pipeline run does the (expensive: Grad-CAM inference
+    per image) extraction, the other three reuse it instantly. Also gives
+    per-study crash resumability for large N within any one of those calls.
+    """
+    return _CHECKPOINT_DIR / f"ablation_{sample_strategy}_{n_studies}.jsonl"
+
+
+def _agentic_checkpoint_path(n_studies: int, finetune_regime: str) -> Path:
+    """
+    Unlike ablation, agentic eval's output depends on the actual model
+    weights (frozen backbone + optional adapter), so this cache is keyed
+    per finetune_regime and invalidated (see _model_mtime) if the underlying
+    checkpoint is newer than the cache -- otherwise resuming after
+    retraining the SAME regime's adapter (same directory name, different
+    weights) would silently replay stale VLM outputs.
+    """
+    return _CHECKPOINT_DIR / f"agentic_{finetune_regime}_{n_studies}.jsonl"
+
+
+def _model_mtime(adapter_path: str, model_path: str) -> float:
+    """Newest mtime among a checkpoint directory's files, or 0 if there's no model on disk to compare against."""
+    p = adapter_path or model_path
+    if not p or not Path(p).exists():
+        return 0.0
+    return max((f.stat().st_mtime for f in Path(p).rglob("*") if f.is_file()), default=0.0)
 
 
 def _extract_features_real(study, cam):
@@ -170,7 +255,10 @@ def _extract_features_real(study, cam):
     return radiomics, xai, vocab, image
 
 
-def run_ablation_on_chexpert(studies: list, model_family: str, synthetic: bool, finetune_regime: str = "frozen"):
+def run_ablation_on_chexpert(
+    studies: list, model_family: str, synthetic: bool,
+    finetune_regime: str = "frozen", sample_strategy: str = "sequential",
+):
     import numpy as np
     from ablation_study import run_ablation, print_ablation_table
 
@@ -190,18 +278,43 @@ def run_ablation_on_chexpert(studies: list, model_family: str, synthetic: bool, 
         cam = load_xai_backend(device=config.VLM_DEVICE)  # loaded ONCE, reused for every study below
         start_time = time.time()
 
+        # Shared across ALL regime-eval calls in one pipeline run (see
+        # _ablation_checkpoint_path's docstring) -- also gives per-study
+        # crash resumability within any one call for a large N.
+        ckpt_path = _ablation_checkpoint_path(len(studies), sample_strategy)
+        cached = _read_jsonl(ckpt_path)
+        if cached:
+            print(f"  Found {len(cached)}/{len(studies)} studies already extracted in {ckpt_path} -- reusing.")
+
         radiomics_list, xai_list, report_texts, labels = [], [], [], []
         n_skipped = 0
         for i, study in enumerate(studies, 1):
-            extracted = _extract_features_real(study, cam)
-            if extracted is None:
-                n_skipped += 1
-                continue
-            radiomics, xai, _vocab, _image = extracted
-            radiomics_list.append(list({k: v for k, v in radiomics.items() if isinstance(v, (int, float))}.values()))
-            xai_list.append([xai["xai_mean"], xai["xai_max"], xai["xai_entropy"], xai["xai_top10pct_mass"]])
-            report_texts.append(study.report_text)
-            labels.append(study.label)
+            rec = cached.get(study.study_id)
+            if rec is not None:
+                if rec.get("skipped"):
+                    n_skipped += 1
+                else:
+                    radiomics_list.append(rec["radiomics"])
+                    xai_list.append(rec["xai"])
+                    report_texts.append(rec["report_text"])
+                    labels.append(rec["label"])
+            else:
+                extracted = _extract_features_real(study, cam)
+                if extracted is None:
+                    n_skipped += 1
+                    _append_jsonl(ckpt_path, {"study_id": study.study_id, "skipped": True})
+                else:
+                    radiomics, xai, _vocab, _image = extracted
+                    radiomics_values = list({k: v for k, v in radiomics.items() if isinstance(v, (int, float))}.values())
+                    xai_values = [xai["xai_mean"], xai["xai_max"], xai["xai_entropy"], xai["xai_top10pct_mass"]]
+                    radiomics_list.append(radiomics_values)
+                    xai_list.append(xai_values)
+                    report_texts.append(study.report_text)
+                    labels.append(study.label)
+                    _append_jsonl(ckpt_path, {
+                        "study_id": study.study_id, "radiomics": radiomics_values,
+                        "xai": xai_values, "report_text": study.report_text, "label": study.label,
+                    })
             _progress(i, len(studies), start_time, label=f"study {study.study_id}")
 
         if n_skipped:
@@ -259,19 +372,53 @@ def run_agentic_on_chexpert(
 
     step0_texts, step1_outputs, step2_outputs, ground_truths = [], [], [], []
     n_skipped = 0
+    n_stale_cache = 0
+
+    cached = {}
+    ckpt_path = None
+    if not synthetic:
+        ckpt_path = _agentic_checkpoint_path(len(studies), finetune_regime)
+        if ckpt_path.exists():
+            model_mtime = _model_mtime(adapter_path, model_path)
+            if finetune_regime != "frozen" and ckpt_path.stat().st_mtime < model_mtime:
+                print(f"  Model checkpoint at {adapter_path or model_path} is newer than the cached eval "
+                      f"outputs in {ckpt_path} -- discarding the stale cache (was likely retrained since).")
+                ckpt_path.unlink()
+            else:
+                cached = _read_jsonl(ckpt_path)
+                if cached:
+                    print(f"  Found {len(cached)}/{len(studies)} studies already evaluated in {ckpt_path} -- reusing.")
 
     for i, study in enumerate(studies, 1):
         if synthetic:
             radiomics, xai, vocab, image_path = {"mean": 0.0}, {"xai_mean": 0.0, "xai_max": 0.0, "xai_entropy": 0.0, "xai_top10pct_mass": 0.0}, {"matched_terms": [], "num_matched_terms": 0}, "synthetic.png"
             report_text = study["report_text"]
+            ground_truth_report = report_text
         else:
+            rec = cached.get(study.study_id)
+            if rec is not None:
+                if rec.get("skipped"):
+                    n_skipped += 1
+                    continue
+                step0_texts.append(rec["step0"])
+                step1_outputs.append(rec["step1"])
+                step2_outputs.append(rec["step2"])
+                if "ground_truth_report" not in rec:
+                    n_stale_cache += 1
+                ground_truths.append(rec.get("ground_truth_report", rec["report_text"]))
+                if not synthetic:
+                    _progress(i, len(studies), start_time, label=f"study {study.study_id} (cached)")
+                continue
+
             extracted = _extract_features_real(study, cam)
             if extracted is None:
                 n_skipped += 1
+                _append_jsonl(ckpt_path, {"study_id": study.study_id, "skipped": True})
                 continue
             radiomics, xai, vocab, _image = extracted
             image_path = study.frontal_image_path
             report_text = study.report_text
+            ground_truth_report = study.metadata.get("ground_truth_report", report_text)
 
         card = build_feature_card(radiomics, xai, vocab)
         card_json = feature_card_to_prompt_text(card)
@@ -282,13 +429,23 @@ def run_agentic_on_chexpert(
         step0_texts.append(result["step0"])
         step1_outputs.append(result["step1"])
         step2_outputs.append(result["step2"])
-        ground_truths.append(report_text)
+        ground_truths.append(ground_truth_report)
+        if not synthetic:
+            _append_jsonl(ckpt_path, {
+                "study_id": study.study_id, "step0": result["step0"],
+                "step1": result["step1"], "step2": result["step2"], "report_text": report_text,
+                "ground_truth_report": ground_truth_report,
+            })
 
         if not synthetic:
             _progress(i, len(studies), start_time, label=f"study {study.study_id}")
 
     if n_skipped:
         print(f"  WARNING: skipped {n_skipped}/{len(studies)} studies with missing/corrupt images.")
+    if n_stale_cache:
+        print(f"  WARNING: {n_stale_cache}/{len(studies)} studies were scored using a stale cached ground "
+              f"truth from {ckpt_path} (predates the target_finding hallucination-scoring fix). Delete that "
+              f"checkpoint file and re-run for corrected hallucination/ROUGE/BERTScore numbers.")
 
     def _to_text(structured_or_str):
         if isinstance(structured_or_str, str):
@@ -391,8 +548,21 @@ def main():
              "LoRA/QLoRA/full-fine-tuned model with the default offset=0 would score it on studies it "
              "was also trained on, inflating every downstream quality metric. Set this to at least "
              "N_FINETUNE_STUDIES (plus a safety margin) when --finetune-regime is lora/qlora/full. "
-             "Ablation is unaffected (never calls the VLM) and always uses offset 0.",
+             "Ablation is unaffected (never calls the VLM) and always uses offset 0. Ignored (in "
+             "favor of exact sidecar-based exclusion) when --sample-strategy random and a "
+             "train_patient_ids.json sidecar is found for --adapter-path/--model-path.",
     )
+    parser.add_argument(
+        "--sample-strategy", choices=["sequential", "random"], default="sequential",
+        help="'random' fixes the non-representative-ablation-sample bug (see CLAUDE.md) and, for "
+             "lora/qlora/full regimes, lets eval exclusion be exact (via the training run's "
+             "train_patient_ids.json sidecar) instead of an offset guess. Applies to both ablation "
+             "and agentic studies.",
+    )
+    parser.add_argument("--seed", type=int, default=None, help="Default: config.RANDOM_SEED.")
+    parser.add_argument("--no-stratify", action="store_true",
+                         help="With --sample-strategy random, plain-shuffle patients instead of "
+                              "stratifying by config.CHEXPERT_TARGET_FINDING.")
     args = parser.parse_args()
 
     if not args.synthetic and not args.model:
@@ -408,11 +578,19 @@ def main():
 
     model_family = args.model or "qwen2-vl"
 
-    if args.finetune_regime in ("lora", "qlora", "full") and args.agentic_offset == 0 and not args.synthetic:
+    _has_sidecar = args.sample_strategy == "random" and _sidecar_train_patient_ids(
+        args.adapter_path or args.model_path
+    ) is not None
+    if (
+        args.finetune_regime in ("lora", "qlora", "full") and args.agentic_offset == 0
+        and not args.synthetic and not _has_sidecar
+    ):
         print(
-            "  WARNING: --finetune-regime is a fine-tuned regime but --agentic-offset is 0 -- the "
-            "agentic/hallucination/text-metrics eval will score studies that may also have been used "
-            "for training, inflating these metrics. Pass --agentic-offset (see --help) unless this is "
+            "  WARNING: --finetune-regime is a fine-tuned regime but --agentic-offset is 0 (and no "
+            "train_patient_ids.json sidecar was found for exact exclusion) -- the agentic/"
+            "hallucination/text-metrics eval will score studies that may also have been used for "
+            "training, inflating these metrics. Pass --agentic-offset (see --help), or use "
+            "--sample-strategy random with a training run that has a sidecar, unless this is "
             "intentional (e.g., checking training-set performance).\n"
         )
 
@@ -430,16 +608,41 @@ def main():
         agentic_studies = studies[args.agentic_offset: args.agentic_offset + args.n_agentic]
     else:
         # Ablation never touches the VLM (pure sklearn over extracted features), so there's no
-        # train/test leakage concern for it -- it always reads from row 0 regardless of
-        # --agentic-offset. Only the agentic/hallucination/text-metrics eval (which actually
-        # generates from the model) needs to be held out from whatever finetune_qwen.py trained on.
-        ablation_studies = _load_real_studies(n=args.n_ablation, uncertain_policy=args.uncertain_policy)
-        agentic_studies = _load_real_studies(
-            n=args.n_agentic, uncertain_policy=args.uncertain_policy, offset=args.agentic_offset,
+        # train/test leakage concern for it -- it always reads from row/patient-order start 0
+        # regardless of --agentic-offset. Only the agentic/hallucination/text-metrics eval (which
+        # actually generates from the model) needs to be held out from whatever finetune_qwen.py
+        # trained on.
+        ablation_studies = _load_real_studies(
+            n=args.n_ablation, uncertain_policy=args.uncertain_policy,
+            sample_strategy=args.sample_strategy, seed=args.seed, stratify=not args.no_stratify,
         )
 
+        train_patient_ids = _sidecar_train_patient_ids(args.adapter_path or args.model_path) \
+            if args.sample_strategy == "random" else None
+
+        if train_patient_ids is not None:
+            from dataset import sample_chexpert_patients
+            full_order = sample_chexpert_patients(
+                csv_path=str(config.CHEXPERT_CSV_PATH),
+                seed=args.seed if args.seed is not None else config.RANDOM_SEED,
+                stratify_by=None if args.no_stratify else config.CHEXPERT_TARGET_FINDING,
+                uncertain_policy=args.uncertain_policy,
+            )
+            eligible = [p for p in full_order if p not in train_patient_ids]
+            agentic_studies = _load_real_studies(
+                n=args.n_agentic, uncertain_policy=args.uncertain_policy,
+                sample_strategy="random", patient_ids=eligible,
+            )
+            print(f"  Excluded exactly the {len(train_patient_ids)} patient(s) recorded as used for "
+                  f"training (sidecar found) -- no offset margin needed.")
+        else:
+            agentic_studies = _load_real_studies(
+                n=args.n_agentic, uncertain_policy=args.uncertain_policy, offset=args.agentic_offset,
+                sample_strategy=args.sample_strategy, seed=args.seed, stratify=not args.no_stratify,
+            )
+
     print(f"\n--- Ablation study ({len(ablation_studies)} studies) ---")
-    run_ablation_on_chexpert(ablation_studies, model_family, args.synthetic)
+    run_ablation_on_chexpert(ablation_studies, model_family, args.synthetic, sample_strategy=args.sample_strategy)
 
     print(f"\n--- Agentic reasoning / hallucination / text metrics ({len(agentic_studies)} studies) ---")
     run_agentic_on_chexpert(

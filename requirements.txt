@@ -5,6 +5,7 @@ scikit-learn
 pandas
 rouge-score
 sacrebleu
+python-dotenv  # loads .env (SAS token / GitHub PAT) -- see .env.example
 
 # --- Needed only for the actual VLM reasoning (Stage 3) and BERTScore ---
 # Install these in Colab / your GPU machine. They are heavy and/or need a

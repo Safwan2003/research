@@ -117,6 +117,11 @@ directly to get the Table 1 AUC numbers.
 
 ### 4. Getting the datasets & Pre-downloading models
 
+- **Secrets**: copy `.env.example` to `.env` and fill in `CHEXPERT_SAS_URL`
+  (and `GITHUB_TOKEN` if you're using the `colab/` pipeline) yourself in a
+  text editor -- `.env` is gitignored. Never hardcode real tokens into any
+  tracked file.
+
 - **CheXpert (CURRENT FOCUS)**:
   Download automatically via Stanford's Azure Blob Storage SAS link:
   ```bash

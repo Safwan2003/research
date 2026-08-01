@@ -244,6 +244,10 @@ def run_finetune(
     eval_every: int = None,
     resume: bool = False,
     warmup_ratio: float = 0.1,
+    sample_strategy: str = "sequential",
+    seed: int = None,
+    stratify: bool = True,
+    uncertain_policy: str = "u_zeros",
 ):
     """
     Fine-tune Qwen2-VL-2B on `n_studies` CheXpert studies under one of three
@@ -298,6 +302,17 @@ def run_finetune(
     to 0 over the rest of training. A flat lr that's reasonable early on can
     cause unstable jumps once the model's mostly converged, which is a
     plausible explanation for occasional loss spikes seen mid-training.
+
+    sample_strategy: "sequential" (default) trains on rows [0, n_studies) of
+    train.csv, which is sorted by patient id -- a narrow, non-representative
+    single-patient-ID-range slice (see src/data/dataset.py's
+    load_chexpert_dataset docstring). "random" fixes this: a patient-level
+    stratified-random sample (seed, stratify, uncertain_policy forwarded to
+    load_chexpert_dataset) whose prevalence tracks the full dataset's. When
+    "random", the exact patient ids trained on are written to
+    <output_dir>_last/train_patient_ids.json so run_chexpert_eval.py can
+    exclude exactly them from its eval slice (exact, not offset-approximate,
+    disjointness).
     """
     import numpy as np
     import torch
@@ -336,8 +351,26 @@ def run_finetune(
         images_root=str(config.CHEXPERT_IMAGES_ROOT),
         limit=n_studies,
         target_finding=config.CHEXPERT_TARGET_FINDING,
+        sample_strategy=sample_strategy,
+        seed=seed if seed is not None else config.RANDOM_SEED,
+        stratify=stratify,
+        uncertain_policy=uncertain_policy,
     )
-    print(f"Loaded {len(studies)} studies (target_finding={config.CHEXPERT_TARGET_FINDING!r}).")
+    print(f"Loaded {len(studies)} studies (target_finding={config.CHEXPERT_TARGET_FINDING!r}, "
+          f"sample_strategy={sample_strategy!r}).")
+
+    if sample_strategy == "random":
+        used_patient_ids = sorted({s.metadata["patient_id"] for s in studies})
+        sidecar_path = Path(last_dir) / "train_patient_ids.json"
+        sidecar_path.write_text(json.dumps({
+            "n_patients": len(used_patient_ids),
+            "seed": seed if seed is not None else config.RANDOM_SEED,
+            "target_finding": config.CHEXPERT_TARGET_FINDING,
+            "uncertain_policy": uncertain_policy,
+            "patient_ids": used_patient_ids,
+        }, indent=2))
+        print(f"Wrote {len(used_patient_ids)} training patient ids to {sidecar_path} "
+              f"(run_chexpert_eval.py reads this for exact eval disjointness).")
 
     rng = np.random.default_rng(config.RANDOM_SEED)
     shuffled = studies.copy()
@@ -586,6 +619,15 @@ if __name__ == "__main__":
         parser.add_argument("--warmup-ratio", type=float, default=0.1,
                              help="Fraction of optimizer steps spent ramping lr up from 0 before "
                                   "linearly decaying it back to 0 over the rest of training.")
+        parser.add_argument("--sample-strategy", choices=["sequential", "random"], default="sequential",
+                             help="'random' fixes the non-representative-sample / patient-leakage bug "
+                                  "-- see CLAUDE.md / src/data/dataset.py. NOTE: with 'random', "
+                                  "--n-studies is a target ROW count (not patient count).")
+        parser.add_argument("--seed", type=int, default=None, help="Default: config.RANDOM_SEED.")
+        parser.add_argument("--no-stratify", action="store_true",
+                             help="With --sample-strategy random, plain-shuffle patients instead of "
+                                  "stratifying by config.CHEXPERT_TARGET_FINDING.")
+        parser.add_argument("--uncertain-policy", choices=["u_zeros", "u_ones"], default="u_zeros")
         args = parser.parse_args()
 
         run_finetune(
@@ -593,4 +635,6 @@ if __name__ == "__main__":
             grad_accum_steps=args.grad_accum_steps, lora_r=args.lora_r, output_dir=args.output_dir,
             val_frac=args.val_frac, patience=args.patience, eval_every=args.eval_every,
             resume=args.resume, warmup_ratio=args.warmup_ratio,
+            sample_strategy=args.sample_strategy, seed=args.seed,
+            stratify=not args.no_stratify, uncertain_policy=args.uncertain_policy,
         )
